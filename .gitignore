@@ -1,0 +1,30 @@
+# Android / Gradle
+.gradle-local/
+**/.gradle/
+**/build/
+**/local.properties
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Release and local generated outputs
+dist/
+*.apk
+*.zip
+
+# Local/private config
+.env
+*.local.properties
+config/*.local.json
+
+# Internal reference exports
+*.xlsx
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

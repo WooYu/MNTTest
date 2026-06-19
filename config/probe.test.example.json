@@ -1,0 +1,22 @@
+{
+  "mqtt": {
+    "host": "",
+    "port": 1883,
+    "env": "test",
+    "clientId": "",
+    "publishTopic": "",
+    "subscribeTopic": "",
+    "username": "",
+    "password": "",
+    "devicePassword": "",
+    "deviceMac": ""
+  },
+  "tcpEcho": {
+    "host": "",
+    "port": 9002
+  },
+  "udpEcho": {
+    "host": "",
+    "port": 9001
+  }
+}
