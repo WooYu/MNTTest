@@ -38,13 +38,6 @@ public final class MainActivity extends Activity {
     private static final int RED = Color.rgb(214, 50, 63);
     private static final int ORANGE = Color.rgb(242, 153, 24);
     private static final String DEFAULT_SIDE_CAR_HOST = "10.0.2.2";
-    private static final String DEFAULT_MQTT_HOST = "";
-    private static final String DEFAULT_MQTT_ENV = "test";
-    private static final String DEFAULT_MQTT_CLIENT_ID = "";
-    private static final String DEFAULT_MQTT_PUBLISH_TOPIC = "";
-    private static final String DEFAULT_MQTT_SUBSCRIBE_TOPIC = "";
-    private static final String DEFAULT_MQTT_DEVICE_PWD = "";
-    private static final String DEFAULT_MQTT_DEVICE_MAC = "";
 
     private EditText hostInput;
     private EditText portInput;
@@ -401,16 +394,16 @@ public final class MainActivity extends Activity {
         title.setPadding(dp(3), 0, dp(3), dp(6));
         mqttConfigContainer.addView(title);
 
-        mqttEnvInput = compactInput(DEFAULT_MQTT_ENV);
-        mqttClientIdInput = compactInput(DEFAULT_MQTT_CLIENT_ID);
-        mqttPublishTopicInput = compactInput(DEFAULT_MQTT_PUBLISH_TOPIC);
-        mqttSubscribeTopicInput = compactInput(DEFAULT_MQTT_SUBSCRIBE_TOPIC);
-        mqttUsernameInput = compactInput(MqttTokenProvider.usernameForEnv(DEFAULT_MQTT_ENV));
+        mqttEnvInput = compactInput(MqttDefaultProfile.ENV);
+        mqttClientIdInput = compactInput(MqttDefaultProfile.CLIENT_ID);
+        mqttPublishTopicInput = compactInput(MqttDefaultProfile.PUBLISH_TOPIC);
+        mqttSubscribeTopicInput = compactInput(MqttDefaultProfile.SUBSCRIBE_TOPIC);
+        mqttUsernameInput = compactInput(MqttTokenProvider.usernameForEnv(MqttDefaultProfile.ENV));
         mqttPasswordInput = compactInput("");
         mqttPasswordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        mqttDevicePwdInput = compactInput(DEFAULT_MQTT_DEVICE_PWD);
+        mqttDevicePwdInput = compactInput(MqttDefaultProfile.DEVICE_PASSWORD);
         mqttDevicePwdInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        mqttDeviceMacInput = compactInput(DEFAULT_MQTT_DEVICE_MAC);
+        mqttDeviceMacInput = compactInput(MqttDefaultProfile.DEVICE_MAC);
 
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
@@ -705,18 +698,18 @@ public final class MainActivity extends Activity {
         if (portInput.getText().toString().trim().isEmpty()
                 || portInput.getText().toString().trim().equals("9001")
                 || portInput.getText().toString().trim().equals("9002")
-                || portInput.getText().toString().trim().equals("1883")) {
+                || portInput.getText().toString().trim().equals(MqttDefaultProfile.PORT)) {
             if (protocol == ProbeConfig.Protocol.UDP) {
                 portInput.setText("9001");
             } else if (protocol == ProbeConfig.Protocol.TCP) {
                 portInput.setText("9002");
             } else {
-                portInput.setText("1883");
+                portInput.setText(MqttDefaultProfile.PORT);
             }
         }
         String host = hostInput.getText().toString().trim();
-        if (host.isEmpty() || host.equals(DEFAULT_SIDE_CAR_HOST) || host.equals(DEFAULT_MQTT_HOST)) {
-            hostInput.setText(protocol == ProbeConfig.Protocol.MQTT ? DEFAULT_MQTT_HOST : DEFAULT_SIDE_CAR_HOST);
+        if (host.isEmpty() || host.equals(DEFAULT_SIDE_CAR_HOST) || host.equals(MqttDefaultProfile.HOST)) {
+            hostInput.setText(protocol == ProbeConfig.Protocol.MQTT ? MqttDefaultProfile.HOST : DEFAULT_SIDE_CAR_HOST);
         }
         if (protocol == ProbeConfig.Protocol.MQTT
                 && (mqttUsernameInput.getText().toString().trim().isEmpty()
@@ -758,6 +751,7 @@ public final class MainActivity extends Activity {
 
     private void loadSavedConfig() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        migrateMqttDefaultProfile(prefs);
         if (!prefs.contains("host")) {
             return;
         }
@@ -765,21 +759,45 @@ public final class MainActivity extends Activity {
         int modeIndex = clamp(prefs.getInt("mode", 0), 0, 3);
         protocolSpinner.setSelection(protocolIndex);
         modeSpinner.setSelection(modeIndex);
-        hostInput.setText(prefs.getString("host", protocolIndex == 2 ? DEFAULT_MQTT_HOST : DEFAULT_SIDE_CAR_HOST));
-        portInput.setText(prefs.getString("port", protocolIndex == 1 ? "9002" : protocolIndex == 2 ? "1883" : "9001"));
+        hostInput.setText(prefs.getString("host", protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX
+                ? MqttDefaultProfile.HOST : DEFAULT_SIDE_CAR_HOST));
+        portInput.setText(prefs.getString("port", protocolIndex == 1 ? "9002"
+                : protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX ? MqttDefaultProfile.PORT : "9001"));
         countInput.setText(prefs.getString("count", "500"));
         ppsInput.setText(prefs.getString("pps", "20"));
         packetBytesInput.setText(prefs.getString("packetBytes", "200"));
         timeoutInput.setText(prefs.getString("timeoutMs", "1200"));
-        mqttClientIdInput.setText(prefs.getString("mqttClientId", DEFAULT_MQTT_CLIENT_ID));
-        mqttPublishTopicInput.setText(prefs.getString("mqttPublishTopic", DEFAULT_MQTT_PUBLISH_TOPIC));
-        mqttSubscribeTopicInput.setText(prefs.getString("mqttSubscribeTopic", DEFAULT_MQTT_SUBSCRIBE_TOPIC));
-        mqttUsernameInput.setText(prefs.getString("mqttUsername", MqttTokenProvider.usernameForEnv(DEFAULT_MQTT_ENV)));
+        mqttClientIdInput.setText(prefs.getString("mqttClientId", MqttDefaultProfile.CLIENT_ID));
+        mqttPublishTopicInput.setText(prefs.getString("mqttPublishTopic", MqttDefaultProfile.PUBLISH_TOPIC));
+        mqttSubscribeTopicInput.setText(prefs.getString("mqttSubscribeTopic", MqttDefaultProfile.SUBSCRIBE_TOPIC));
+        mqttUsernameInput.setText(prefs.getString("mqttUsername",
+                MqttTokenProvider.usernameForEnv(MqttDefaultProfile.ENV)));
         mqttPasswordInput.setText(prefs.getString("mqttPassword", ""));
-        mqttEnvInput.setText(prefs.getString("mqttEnv", DEFAULT_MQTT_ENV));
-        mqttDevicePwdInput.setText(prefs.getString("mqttDevicePwd", DEFAULT_MQTT_DEVICE_PWD));
-        mqttDeviceMacInput.setText(prefs.getString("mqttDeviceMac", DEFAULT_MQTT_DEVICE_MAC));
+        mqttEnvInput.setText(prefs.getString("mqttEnv", MqttDefaultProfile.ENV));
+        mqttDevicePwdInput.setText(prefs.getString("mqttDevicePwd", MqttDefaultProfile.DEVICE_PASSWORD));
+        mqttDeviceMacInput.setText(prefs.getString("mqttDeviceMac", MqttDefaultProfile.DEVICE_MAC));
         updateProtocolUi();
+    }
+
+    private void migrateMqttDefaultProfile(SharedPreferences prefs) {
+        int storedVersion = prefs.getInt(MqttDefaultProfile.PREFERENCE_VERSION_KEY, 0);
+        if (!MqttDefaultProfile.requiresMigration(storedVersion)) {
+            return;
+        }
+        prefs.edit()
+                .putInt(MqttDefaultProfile.PREFERENCE_VERSION_KEY, MqttDefaultProfile.VERSION)
+                .putInt("protocol", MqttDefaultProfile.PROTOCOL_INDEX)
+                .putString("host", MqttDefaultProfile.HOST)
+                .putString("port", MqttDefaultProfile.PORT)
+                .putString("mqttClientId", MqttDefaultProfile.CLIENT_ID)
+                .putString("mqttPublishTopic", MqttDefaultProfile.PUBLISH_TOPIC)
+                .putString("mqttSubscribeTopic", MqttDefaultProfile.SUBSCRIBE_TOPIC)
+                .putString("mqttUsername", MqttTokenProvider.usernameForEnv(MqttDefaultProfile.ENV))
+                .putString("mqttPassword", "")
+                .putString("mqttEnv", MqttDefaultProfile.ENV)
+                .putString("mqttDevicePwd", MqttDefaultProfile.DEVICE_PASSWORD)
+                .putString("mqttDeviceMac", MqttDefaultProfile.DEVICE_MAC)
+                .apply();
     }
 
     private void saveCurrentConfig() {
