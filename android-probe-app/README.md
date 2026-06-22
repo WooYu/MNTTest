@@ -80,7 +80,7 @@ adb install -r .\android-probe-app\app\build\outputs\apk\debug\app-debug.apk
 - `Protocol`：选择 `TCP Echo`
 - `Host`：TCP Echo Sidecar 所在服务器 IP 或域名
 - `Port`：自动切到 `9002`
-- `Count/PPS/Bytes/Timeout`：默认 `500/20/200/1200` 可先不改
+- `Count/PPS/Bytes/Timeout`：MQTT 推荐 `300/5/200/5000`（方案 A）；UDP/TCP 仍可用 `500/20/200/1200`
 
 ### MQTT 两台平板模型
 
@@ -127,6 +127,15 @@ App 导出目录：
 /sdcard/Android/data/com.mnatool.yunjutongprobe/files/Documents/probe-runs/
 ```
 
-CSV 是逐包明细，Summary JSON 是当前 run 的聚合指标。对比云聚通效果时优先看 Summary JSON 的 `lossRate`、`p95RttMs`、`p99RttMs`、`jitterMs`、`maxBurstLoss`，CSV 用于定位异常片段。
+CSV 是逐包明细，Summary JSON 是当前 run 的聚合指标。对比云聚通效果时优先看 Summary JSON 的 `lossRate`、`p95RttMs`、`p99RttMs`、`jitterMs`、`maxBurstLoss`，CSV 用于定位异常片段。Summary 中的 `weakNetProfile` 记录 Clumsy/tc 等弱网注入参数，弱网 A/B 对比时必须保持一致。
 
 注意：TCP/MQTT 的 `lossRate` 表示应用层超时率，不等同于真实网络丢包率。真实丢包判断仍以 UDP Probe 为准。
+
+## 弱网模拟（Clumsy）
+
+参数设置页可填写弱网 Profile（工具、丢包%、延迟 ms、抖动 ms、备注）。这些值会写入 Summary JSON，不会由 App 自动控制 Clumsy——请在 PC 上手动配置 Clumsy 与 App 内记录保持一致。弱网场景测试模式建议：
+
+| 场景 | modeTag |
+| --- | --- |
+| 弱网、未开云聚通 | 弱网基线 |
+| 弱网、开云聚通 | 弱网加速 |

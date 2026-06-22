@@ -3,7 +3,9 @@ package com.mnatool.yunjutongprobe;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.Manifest;
 import android.graphics.Color;
 import android.util.Log;
 import android.graphics.Typeface;
@@ -27,6 +29,7 @@ import android.widget.GridLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -39,6 +42,7 @@ import java.util.UUID;
 
 public final class MainActivity extends Activity {
     private static final String PREFS = "probe_config";
+    private static final int REQ_STORAGE = 1001;
     // 配色统一收敛到 Palette；此处保留语义别名以贴合各处调用习惯。
     private static final int BG = Palette.BG;
     private static final int SURFACE = Palette.SURFACE;
@@ -54,11 +58,17 @@ public final class MainActivity extends Activity {
     private static final long MQTT_TOKEN_PREFETCH_DELAY_MS = 400L;
 
     private EditText hostInput;
+    private Spinner hostSpinner;
     private EditText portInput;
     private EditText countInput;
     private EditText ppsInput;
     private EditText packetBytesInput;
     private EditText timeoutInput;
+    private Spinner weakNetToolSpinner;
+    private EditText weakNetLossInput;
+    private EditText weakNetDelayInput;
+    private EditText weakNetJitterInput;
+    private EditText weakNetNoteInput;
     private EditText mqttClientIdInput;
     private EditText mqttPublishTopicInput;
     private EditText mqttSubscribeTopicInput;
@@ -72,6 +82,8 @@ public final class MainActivity extends Activity {
     private Spinner mqttRoleSpinner;
     private LinearLayout mqttConfigContainer;
     private LinearLayout mqttRoleRow;
+    private TextView mqttRoleHintView;
+    private TextView mqttPairImportHintView;
     private Button startButton;
     private Button stopButton;
     private Button viewResultButton;
@@ -95,6 +107,7 @@ public final class MainActivity extends Activity {
     private EventLogScrollView eventLogScrollView;
     private final List<String> eventLines = new ArrayList<>();
     private static final int MAX_EVENT_LINES = 30;
+    private static final int MAX_RESPONDER_EVENT_LINES = 100;
     private boolean eventLogFollowLatest = true;
     private TextView exportView;
     private MetricsChartView chartView;
@@ -108,6 +121,10 @@ public final class MainActivity extends Activity {
     private List<ProbeSample> lastSamples = new ArrayList<>();
     private Button modeBaselineButton;
     private Button modeAccelButton;
+    private Switch weakNetSceneSwitch;
+    private LinearLayout weakNetCollapsibleBody;
+    private LinearLayout mqttAdvancedBody;
+    private Palette.SectionTheme activeFieldTheme;
     private TextView compareView;
     private ProbeMetrics prevMetrics;
     private ProbeConfig prevConfig;
@@ -115,6 +132,17 @@ public final class MainActivity extends Activity {
     private View pageConfig;
     private View pageMonitor;
     private View pageResult;
+    private View pageHistory;
+    private View pageHistoryDetail;
+    private LinearLayout historyListContainer;
+    private TextView historyDetailView;
+    private TextView historyChartEmptyView;
+    private View historyChartCard;
+    private View historyLossCard;
+    private ProbeRunRecord selectedHistoryRecord;
+    private final ScopeViewport historyScopeViewport = new ScopeViewport();
+    private MetricsChartView historyChartView;
+    private PacketEventStripView historyPacketStripView;
     // 运行页可切换区块：回显端模式下隐藏 RTT/丢包相关卡片，只保留回显状态与事件日志。
     private View monitorStatusPill;
     private View monitorMetricCards;
@@ -122,6 +150,9 @@ public final class MainActivity extends Activity {
     private View monitorLossCard;
     private View monitorOverviewCard;
     private View monitorPacketRecordsCard;
+    private View monitorProbePanel;
+    private View monitorResponderPanel;
+    private LinearLayout.LayoutParams eventLogHeightParams;
     private View responderCard;
     private TextView responderCountView;
     private TextView responderDetailView;
@@ -135,6 +166,9 @@ public final class MainActivity extends Activity {
     private int mqttTokenFetchGeneration;
     private final Handler mqttTokenHandler = new Handler(Looper.getMainLooper());
     private Runnable mqttTokenPrefetchRunnable;
+    private boolean pendingExportAfterPermission;
+    private boolean wideLayout;
+    private View monitorBtnSpacer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -157,7 +191,32 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_STORAGE) {
+            return;
+        }
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            if (pendingExportAfterPermission) {
+                pendingExportAfterPermission = false;
+                exportLastRun(true);
+            }
+        } else {
+            pendingExportAfterPermission = false;
+            Toast.makeText(this, "需要存储权限才能导出到 Download 目录", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
     public void onBackPressed() {
+        if (pageHistoryDetail != null && pageHistoryDetail.getVisibility() == View.VISIBLE) {
+            showHistoryList();
+            return;
+        }
+        if (pageHistory != null && pageHistory.getVisibility() == View.VISIBLE) {
+            closeHistory();
+            return;
+        }
         if (flow.page() == ProbeFlowState.Page.RUNNING) {
             if (flow.awaitingConfirm()) {
                 // 测试已完成、待确认：返回键回到参数设置页，不直接跳结果页
@@ -173,12 +232,13 @@ public final class MainActivity extends Activity {
     }
 
     private View buildContent() {
+        wideLayout = TabletLayout.isWide(this);
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
         outer.setBackgroundColor(BG);
 
         outer.addView(buildStepIndicator(), new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(56)));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(TabletLayout.stepBarHeightDp(wideLayout))));
         View divider = new View(this);
         divider.setBackgroundColor(LINE);
         outer.addView(divider, new LinearLayout.LayoutParams(
@@ -191,6 +251,8 @@ public final class MainActivity extends Activity {
         pageConfig = buildConfigPage();
         pageMonitor = buildMonitorPage();
         pageResult = buildResultPage();
+        pageHistory = buildHistoryPage();
+        pageHistoryDetail = buildHistoryDetailPage();
 
         pageContainer.addView(pageConfig, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -198,6 +260,12 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         pageContainer.addView(pageResult, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        pageContainer.addView(pageHistory, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        pageContainer.addView(pageHistoryDetail, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        pageHistory.setVisibility(View.GONE);
+        pageHistoryDetail.setVisibility(View.GONE);
 
         renderPage();
         startButton.setOnClickListener(v -> startProbe());
@@ -207,11 +275,27 @@ public final class MainActivity extends Activity {
     }
 
     private View header() {
+        if (wideLayout) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(2), dp(2), dp(2), dp(TabletLayout.headerBottomGapDp(wideLayout)));
+
+            LinearLayout titles = new LinearLayout(this);
+            titles.setOrientation(LinearLayout.VERTICAL);
+            titles.addView(text("参数设置", 24, BLUE, Typeface.BOLD));
+            headerSubtitleView = smallText("配置探测目标与采样参数，开始后进入实时监测", MUTED, Typeface.NORMAL);
+            headerSubtitleView.setPadding(0, dp(4), 0, 0);
+            titles.addView(headerSubtitleView);
+            row.addView(titles, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            return row;
+        }
+
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dp(2), dp(2), dp(2), dp(10));
+        header.setPadding(dp(2), dp(2), dp(2), dp(TabletLayout.headerBottomGapDp(wideLayout)));
 
-        TextView title = text("参数设置", 22, INK, Typeface.BOLD);
+        TextView title = text("参数设置", 22, BLUE, Typeface.BOLD);
         header.addView(title);
 
         headerSubtitleView = smallText("配置探测目标与采样参数，开始后进入实时监测", MUTED, Typeface.NORMAL);
@@ -270,7 +354,7 @@ public final class MainActivity extends Activity {
 
         GridLayout.LayoutParams params = new GridLayout.LayoutParams();
         params.width = 0;
-        params.height = dp(78);
+        params.height = dp(wideLayout ? 88 : 78);
         params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
         params.setMargins(dp(3), dp(3), dp(3), dp(3));
         grid.addView(card, params);
@@ -333,6 +417,7 @@ public final class MainActivity extends Activity {
         metricsLineView.setPadding(dp(12), dp(10), dp(12), dp(10));
         metricsLineView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, Palette.RADIUS_INNER));
         metricsLineView.setLineSpacing(dp(3), 1f);
+        metricsLineView.setVisibility(View.GONE);
         LinearLayout.LayoutParams metricsParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         metricsParams.topMargin = dp(10);
@@ -358,7 +443,7 @@ public final class MainActivity extends Activity {
         packetRecordScrollView.addView(packetRecordView, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(190));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(TabletLayout.packetRecordHeightDp(wideLayout)));
         lp.topMargin = dp(8);
         card.addView(packetRecordScrollView, lp);
         return card;
@@ -376,8 +461,9 @@ public final class MainActivity extends Activity {
         eventLogScrollView.addView(eventLogView, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(150));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(TabletLayout.eventLogHeightDp(wideLayout)));
         lp.topMargin = dp(8);
+        eventLogHeightParams = lp;
         card.addView(eventLogScrollView, lp);
         return card;
     }
@@ -407,7 +493,7 @@ public final class MainActivity extends Activity {
         bar.setBackgroundColor(Palette.SURFACE_MUTED);
         String[] labels = {"1  参数设置", "2  运行状态", "3  测试结果"};
         for (int i = 0; i < labels.length; i++) {
-            TextView step = text(labels[i], 13, MUTED, Typeface.NORMAL);
+            TextView step = text(labels[i], wideLayout ? 14 : 13, MUTED, Typeface.NORMAL);
             step.setGravity(Gravity.CENTER);
             stepViews[i] = step;
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
@@ -423,20 +509,23 @@ public final class MainActivity extends Activity {
         pageConfig.setVisibility(page == ProbeFlowState.Page.CONFIG ? View.VISIBLE : View.GONE);
         pageMonitor.setVisibility(page == ProbeFlowState.Page.RUNNING ? View.VISIBLE : View.GONE);
         pageResult.setVisibility(page == ProbeFlowState.Page.RESULT ? View.VISIBLE : View.GONE);
+        if (page != ProbeFlowState.Page.CONFIG) {
+            closeHistory();
+        }
         updateStepIndicator(page);
     }
 
     private void updateStepIndicator(ProbeFlowState.Page page) {
         int current = page.ordinal();
+        String[] labels = {"1  参数设置", "2  运行状态", "3  测试结果"};
         for (int i = 0; i < stepViews.length; i++) {
             TextView step = stepViews[i];
             boolean active = i == current;
             boolean completed = i < current;
-            int foreground = active ? BLUE : completed ? GREEN : MUTED;
-            int fill = active ? Palette.PRIMARY_SUBTLE
-                    : completed ? Palette.SUCCESS_SUBTLE : Color.TRANSPARENT;
-            int stroke = active ? Palette.PRIMARY_BORDER
-                    : completed ? Palette.SUCCESS_BORDER : Color.TRANSPARENT;
+            int foreground = active ? BLUE : (completed ? MUTED : Palette.FAINT);
+            int fill = active ? Palette.PRIMARY_SUBTLE : Color.TRANSPARENT;
+            int stroke = active ? Palette.PRIMARY_BORDER : Color.TRANSPARENT;
+            step.setText(completed ? ("✓ " + labels[i].substring(2)) : labels[i]);
             step.setTextColor(foreground);
             step.setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
             step.setBackground(rounded(fill, stroke, Palette.RADIUS_PILL));
@@ -444,6 +533,212 @@ public final class MainActivity extends Activity {
     }
 
     private View buildConfigPage() {
+        startButton = button("开始测试", BLUE, Color.WHITE);
+        Button historyButton = button("历史记录", Palette.PRIMARY_SUBTLE, BLUE);
+        historyButton.setOnClickListener(v -> openHistory());
+        View footer = configActionFooter(startButton, historyButton);
+
+        View connection = configConnectionSection();
+        View probe = configProbeSection();
+        View mode = configModeSection();
+        View weakNet = configWeakNetSection();
+        View mqtt = mqttConfigBlock();
+        updateProtocolUi();
+        refreshModeToggle();
+
+        if (wideLayout) {
+            LinearLayout page = new LinearLayout(this);
+            page.setOrientation(LinearLayout.VERTICAL);
+            page.setLayoutParams(new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            page.setBackgroundColor(BG);
+
+            LinearLayout headerWrap = new LinearLayout(this);
+            headerWrap.setOrientation(LinearLayout.VERTICAL);
+            headerWrap.setPadding(
+                    dp(TabletLayout.pagePaddingH(wideLayout)),
+                    dp(TabletLayout.pagePaddingV(wideLayout)),
+                    dp(TabletLayout.pagePaddingH(wideLayout)),
+                    0);
+            headerWrap.addView(header());
+            page.addView(headerWrap, matchWrap());
+
+            LinearLayout columns = new LinearLayout(this);
+            columns.setOrientation(LinearLayout.HORIZONTAL);
+            columns.setPadding(
+                    dp(TabletLayout.pagePaddingH(wideLayout)),
+                    0,
+                    dp(TabletLayout.pagePaddingH(wideLayout)),
+                    0);
+            columns.addView(configColumnScroll(connection, probe, mode, weakNet),
+                    new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+            columns.addView(space(dp(TabletLayout.columnGapDp(wideLayout)), 1));
+            columns.addView(configColumnScroll(mqtt),
+                    new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+            page.addView(columns, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+            page.addView(wrapStickyFooter(footer));
+            return page;
+        }
+
+        LinearLayout scrollRoot = new LinearLayout(this);
+        scrollRoot.setOrientation(LinearLayout.VERTICAL);
+        scrollRoot.setPadding(
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingV(wideLayout)),
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingBottom(wideLayout)));
+        scrollRoot.addView(header());
+        scrollRoot.addView(connection);
+        scrollRoot.addView(probe);
+        scrollRoot.addView(mode);
+        scrollRoot.addView(weakNet);
+        scrollRoot.addView(mqtt);
+        return stickyFooterPage(scrollRoot, footer);
+    }
+
+    private View configActionFooter(Button start, Button history) {
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        if (wideLayout) {
+            actions.addView(start, new LinearLayout.LayoutParams(0, buttonHeight(), 2f));
+            actions.addView(space(dp(12), 1));
+            actions.addView(history, new LinearLayout.LayoutParams(0, buttonHeight(), 1f));
+        } else {
+            actions.setOrientation(LinearLayout.VERTICAL);
+            actions.addView(start, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, buttonHeight()));
+            LinearLayout.LayoutParams hbp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, buttonHeight());
+            hbp.topMargin = dp(8);
+            actions.addView(history, hbp);
+        }
+        return actions;
+    }
+
+    private ScrollView configColumnScroll(View... sections) {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        LinearLayout wrapper = configColumn(sections);
+        LinearLayout.LayoutParams wrapParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        wrapParams.bottomMargin = dp(TabletLayout.pagePaddingBottom(wideLayout));
+        wrapper.setLayoutParams(wrapParams);
+        sv.addView(wrapper, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        return sv;
+    }
+
+    private View wrapStickyFooter(View footer) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
+        bar.setBackgroundColor(SURFACE);
+        View divider = new View(this);
+        divider.setBackgroundColor(LINE);
+        bar.addView(divider, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 1));
+        bar.setPadding(
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(10),
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(12));
+        bar.addView(footer);
+        return bar;
+    }
+
+    private LinearLayout stickyFooterPage(View scrollContent, View footer) {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        page.setBackgroundColor(BG);
+
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.addView(scrollContent, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        page.addView(sv, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        page.addView(wrapStickyFooter(footer));
+        return page;
+    }
+
+    private LinearLayout configColumn(View... sections) {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        for (int i = 0; i < sections.length; i++) {
+            if (i == 0) {
+                stripTopMargin(sections[i]);
+            }
+            column.addView(sections[i], new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        }
+        return column;
+    }
+
+    private void stripTopMargin(View view) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        if (view.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+            params = (LinearLayout.LayoutParams) view.getLayoutParams();
+        }
+        params.topMargin = 0;
+        view.setLayoutParams(params);
+    }
+
+    private View buildHistoryPage() {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        page.setBackgroundColor(BG);
+
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setPadding(
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingV(wideLayout)),
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(8));
+        Button backButton = button("← 返回", Palette.SURFACE_SUBTLE, INK);
+        backButton.setOnClickListener(v -> closeHistory());
+        topBar.addView(backButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, buttonHeight()));
+        TextView title = text("历史记录", wideLayout ? 22 : 20, INK, Typeface.BOLD);
+        title.setPadding(dp(12), 0, 0, 0);
+        topBar.addView(title, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        page.addView(topBar, matchWrap());
+
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                0,
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingBottom(wideLayout)));
+        sv.addView(root, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+
+        TextView hint = smallText("记录保存在 " + ProbeRunRecord.DOWNLOADS_FOLDER
+                + "，点击条目查看详情", MUTED, Typeface.NORMAL);
+        hint.setPadding(dp(2), 0, dp(2), dp(12));
+        root.addView(hint);
+
+        historyListContainer = new LinearLayout(this);
+        historyListContainer.setOrientation(LinearLayout.VERTICAL);
+        root.addView(historyListContainer, matchWrap());
+
+        page.addView(sv, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return page;
+    }
+
+    private View buildHistoryDetailPage() {
         ScrollView sv = new ScrollView(this);
         sv.setFillViewport(true);
         sv.setBackgroundColor(BG);
@@ -452,67 +747,366 @@ public final class MainActivity extends Activity {
         root.setPadding(dp(14), dp(14), dp(14), dp(24));
         sv.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        root.addView(header());
-        root.addView(configCard());
-        startButton = button("开始测试", BLUE, Color.WHITE);
-        LinearLayout.LayoutParams sbp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
-        sbp.topMargin = dp(14);
-        root.addView(startButton, sbp);
+
+        TextView title = text("历史详情", 20, INK, Typeface.BOLD);
+        title.setPadding(dp(2), 0, dp(2), dp(10));
+        root.addView(title);
+
+        historyDetailView = new TextView(this);
+        historyDetailView.setTextSize(13);
+        historyDetailView.setTextColor(INK);
+        historyDetailView.setPadding(dp(14), dp(14), dp(14), dp(14));
+        historyDetailView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+        historyDetailView.setText("暂无详情");
+        root.addView(historyDetailView, matchWrap());
+
+        historyChartEmptyView = smallText("", MUTED, Typeface.NORMAL);
+        historyChartEmptyView.setPadding(dp(14), dp(10), dp(14), dp(10));
+        historyChartEmptyView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+        historyChartEmptyView.setVisibility(View.GONE);
+        LinearLayout.LayoutParams emptyParams = matchWrap();
+        emptyParams.topMargin = dp(10);
+        historyChartEmptyView.setLayoutParams(emptyParams);
+        root.addView(historyChartEmptyView);
+
+        historyChartView = new MetricsChartView(this);
+        historyScopeViewport.configure(dp(MetricsChartView.SPACING_DP),
+                dp(MetricsChartView.LEFT_PAD_DP), dp(MetricsChartView.RIGHT_PAD_DP));
+        historyChartView.attachViewport(historyScopeViewport);
+        historyChartCard = sectionCard("RTT 趋势（历史回放）", chartHeader(), historyChartView);
+        LinearLayout.LayoutParams chartParams = matchWrap();
+        chartParams.topMargin = dp(10);
+        historyChartCard.setLayoutParams(chartParams);
+        historyChartCard.setVisibility(View.GONE);
+        root.addView(historyChartCard);
+
+        historyPacketStripView = new PacketEventStripView(this);
+        historyPacketStripView.attachViewport(historyScopeViewport);
+        historyLossCard = sectionCard("丢包事件条（历史回放）", null, historyPacketStripView);
+        LinearLayout.LayoutParams lossParams = matchWrap();
+        lossParams.topMargin = dp(10);
+        historyLossCard.setLayoutParams(lossParams);
+        historyLossCard.setVisibility(View.GONE);
+        root.addView(historyLossCard);
+
+        Button deleteButton = button("删除记录", RED, Color.WHITE);
+        deleteButton.setOnClickListener(v -> confirmDeleteHistoryRecord());
+        LinearLayout.LayoutParams dp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
+        dp.topMargin = dp(14);
+        root.addView(deleteButton, dp);
+
+        Button backButton = button("返回列表", Palette.SURFACE_SUBTLE, INK);
+        backButton.setOnClickListener(v -> showHistoryList());
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
+        bp.topMargin = dp(14);
+        root.addView(backButton, bp);
         return sv;
     }
 
-    private View buildMonitorPage() {
-        ScrollView sv = new ScrollView(this);
-        sv.setFillViewport(true);
-        sv.setBackgroundColor(BG);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(14), dp(10), dp(14), dp(24));
-        sv.addView(root, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        TextView title = text("运行状态", 20, INK, Typeface.BOLD);
-        root.addView(title);
-        TextView subtitle = smallText("实时监测链路质量，运行期间停止或返回需确认", MUTED, Typeface.NORMAL);
-        subtitle.setPadding(0, dp(4), 0, dp(8));
-        root.addView(subtitle);
-        monitorStatusPill = statusPill();
-        root.addView(monitorStatusPill);
-        responderCard = responderCard();
-        root.addView(responderCard);
-        monitorMetricCards = metricCards();
-        root.addView(monitorMetricCards);
-        monitorRttCard = sectionCard("RTT 趋势", chartHeader(), chartView());
-        root.addView(monitorRttCard);
-        monitorLossCard = sectionCard("丢包事件条", null, eventStrip());
-        root.addView(monitorLossCard);
-        monitorOverviewCard = overviewCard();
-        root.addView(monitorOverviewCard);
-        monitorPacketRecordsCard = packetRecordsCard();
-        root.addView(monitorPacketRecordsCard);
-        root.addView(eventLogCard());
-        stopButton = button("停止测试", RED, Color.WHITE);
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
-        sp.topMargin = dp(14);
-        root.addView(stopButton, sp);
+    private void openHistory() {
+        if (flow.page() != ProbeFlowState.Page.CONFIG) {
+            return;
+        }
+        if (!ensureStoragePermission(false)) {
+            Toast.makeText(this, "请授予存储权限以读取 Download 中的历史记录", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        refreshHistoryList();
+        pageHistory.setVisibility(View.VISIBLE);
+        pageHistoryDetail.setVisibility(View.GONE);
+    }
 
+    private void closeHistory() {
+        pageHistory.setVisibility(View.GONE);
+        pageHistoryDetail.setVisibility(View.GONE);
+        selectedHistoryRecord = null;
+    }
+
+    private void showHistoryList() {
+        pageHistoryDetail.setVisibility(View.GONE);
+        pageHistory.setVisibility(View.VISIBLE);
+        selectedHistoryRecord = null;
+    }
+
+    private void showHistoryDetail(ProbeRunRecord record) {
+        if (record == null) {
+            return;
+        }
+        selectedHistoryRecord = record;
+        historyDetailView.setText(record.detailText());
+        populateHistoryCharts(record);
+        pageHistory.setVisibility(View.GONE);
+        pageHistoryDetail.setVisibility(View.VISIBLE);
+    }
+
+    private void populateHistoryCharts(ProbeRunRecord record) {
+        if (historyChartCard == null || historyLossCard == null || historyChartEmptyView == null) {
+            return;
+        }
+        historyChartCard.setVisibility(View.GONE);
+        historyLossCard.setVisibility(View.GONE);
+        historyChartEmptyView.setVisibility(View.GONE);
+        try {
+            List<ProbeSample> samples = ProbeStorage.readSamples(this, record);
+            if (samples.isEmpty()) {
+                showHistoryChartEmpty("无法从 CSV 解析采样数据，请确认 "
+                        + ProbeRunRecord.DOWNLOADS_FOLDER + "/" + record.baseName + "/samples.csv 存在且非空");
+                return;
+            }
+            long timeoutMs = ProbeStorage.readTimeoutMs(this, record);
+            ProbeMetrics metrics = MetricsCalculator.calculate(
+                    samples, Long.MAX_VALUE, timeoutMs * 1_000_000L, true);
+            historyScopeViewport.setTotalPoints(computeTotalPoints(samples));
+            historyChartView.update(samples, metrics, timeoutMs);
+            historyPacketStripView.update(samples, metrics, timeoutMs);
+            historyChartCard.setVisibility(View.VISIBLE);
+            historyLossCard.setVisibility(View.VISIBLE);
+        } catch (Exception exc) {
+            showHistoryChartEmpty("读取 CSV 失败: " + exc.getMessage());
+        }
+    }
+
+    private void showHistoryChartEmpty(String message) {
+        historyChartEmptyView.setText(message);
+        historyChartEmptyView.setVisibility(View.VISIBLE);
+        historyChartCard.setVisibility(View.GONE);
+        historyLossCard.setVisibility(View.GONE);
+    }
+
+    private void confirmDeleteHistoryRecord() {
+        if (selectedHistoryRecord == null) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("删除历史记录")
+                .setMessage("将删除 " + ProbeRunRecord.DOWNLOADS_FOLDER + " 中的 CSV、Summary 及索引条目，此操作不可恢复。")
+                .setPositiveButton("删除", (dialog, which) -> {
+                    try {
+                        ProbeStorage.deleteRun(this, selectedHistoryRecord);
+                        Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show();
+                        showHistoryList();
+                        refreshHistoryList();
+                    } catch (Exception exc) {
+                        Toast.makeText(this, "删除失败: " + exc.getMessage(), Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private boolean ensureStoragePermission(boolean forExport) {
+        if (!ProbeStorage.needsLegacyStoragePermission()) {
+            return true;
+        }
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+            return true;
+        }
+        pendingExportAfterPermission = forExport;
+        requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
+        return false;
+    }
+
+    private void refreshHistoryList() {
+        if (historyListContainer == null) {
+            return;
+        }
+        historyListContainer.removeAllViews();
+        List<ProbeRunRecord> records = ProbeStorage.listRuns(this);
+        if (records.isEmpty()) {
+            TextView empty = smallText("暂无已导出的测试记录\n完成测试后会自动导出至 "
+                    + ProbeRunRecord.DOWNLOADS_FOLDER, MUTED, Typeface.NORMAL);
+            empty.setPadding(dp(14), dp(20), dp(14), dp(20));
+            empty.setGravity(Gravity.CENTER);
+            empty.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+            historyListContainer.addView(empty, matchWrap());
+            return;
+        }
+        for (int i = 0; i < records.size(); i++) {
+            View item = buildHistoryListItem(records.get(i));
+            if (wideLayout) {
+                if (i % 2 == 0) {
+                    LinearLayout row = new LinearLayout(this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    LinearLayout.LayoutParams rowParams = matchWrap();
+                    rowParams.bottomMargin = dp(10);
+                    row.setLayoutParams(rowParams);
+                    row.addView(item, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                    if (i + 1 < records.size()) {
+                        row.addView(space(dp(10), 1));
+                        row.addView(buildHistoryListItem(records.get(i + 1)),
+                                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                        i++;
+                    } else {
+                        row.addView(space(dp(10), 1));
+                        row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+                    }
+                    historyListContainer.addView(row);
+                }
+            } else {
+                historyListContainer.addView(item);
+            }
+        }
+    }
+
+    private View buildHistoryListItem(ProbeRunRecord record) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.HORIZONTAL);
+        item.setGravity(Gravity.CENTER_VERTICAL);
+        item.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        LinearLayout textCol = new LinearLayout(this);
+        textCol.setOrientation(LinearLayout.VERTICAL);
+        TextView titleView = text(record.listTitle(), 14, INK, Typeface.BOLD);
+        textCol.addView(titleView);
+        TextView subView = smallText(record.listSubtitle(), MUTED, Typeface.NORMAL);
+        subView.setPadding(0, dp(4), 0, 0);
+        textCol.addView(subView);
+        if (!record.csvFile.isFile()) {
+            TextView warn = smallText("CSV 缺失", ORANGE, Typeface.NORMAL);
+            warn.setPadding(0, dp(4), 0, 0);
+            textCol.addView(warn);
+        }
+        item.addView(textCol, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        LinearLayout badges = new LinearLayout(this);
+        badges.setOrientation(LinearLayout.VERTICAL);
+        badges.setGravity(Gravity.END);
+        badges.addView(historyBadge(record.protocol, Palette.SECTION_MQTT.accent, Palette.SECTION_MQTT.surface));
+        TextView metricsBadge = historyBadge(record.listMetricsSummary(), BLUE, Palette.PRIMARY_SUBTLE);
+        LinearLayout.LayoutParams mb = matchWrap();
+        mb.topMargin = dp(6);
+        metricsBadge.setLayoutParams(mb);
+        badges.addView(metricsBadge);
+        item.addView(badges);
+
+        item.setClickable(true);
+        item.setFocusable(true);
+        item.setBackground(new RippleDrawable(
+                ColorStateList.valueOf(Palette.withAlpha(BLUE, 40)),
+                rounded(Palette.SURFACE_SUBTLE, LINE, 12),
+                null));
+        item.setOnClickListener(v -> showHistoryDetail(record));
+        return item;
+    }
+
+    private TextView historyBadge(String label, int textColor, int fill) {
+        TextView badge = text(label, 11, textColor, Typeface.BOLD);
+        badge.setPadding(dp(10), dp(5), dp(10), dp(5));
+        badge.setBackground(rounded(fill, LINE, Palette.RADIUS_PILL));
+        badge.setGravity(Gravity.CENTER);
+        return badge;
+    }
+
+    private View buildMonitorPage() {
+        stopButton = button("停止测试", RED, Color.WHITE);
         viewResultButton = button("查看测试结果", BLUE, Color.WHITE);
         viewResultButton.setVisibility(View.GONE);
         viewResultButton.setOnClickListener(v -> confirmShowResult());
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
-        rp.topMargin = dp(14);
-        root.addView(viewResultButton, rp);
-        return sv;
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.addView(stopButton, new LinearLayout.LayoutParams(0, buttonHeight(), 1f));
+        monitorBtnSpacer = space(dp(12), 1);
+        btnRow.addView(monitorBtnSpacer);
+        btnRow.addView(viewResultButton, new LinearLayout.LayoutParams(0, buttonHeight(), 1f));
+
+        LinearLayout scrollRoot = new LinearLayout(this);
+        scrollRoot.setOrientation(LinearLayout.VERTICAL);
+        scrollRoot.setPadding(
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingV(wideLayout)),
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingBottom(wideLayout)));
+
+        TextView title = text("运行状态", wideLayout ? 22 : 20, INK, Typeface.BOLD);
+        scrollRoot.addView(title);
+        TextView subtitle = smallText("实时监测链路质量，运行期间停止或返回需确认", MUTED, Typeface.NORMAL);
+        subtitle.setPadding(0, dp(4), 0, dp(wideLayout ? 12 : 8));
+        scrollRoot.addView(subtitle);
+
+        monitorStatusPill = statusPill();
+        responderCard = responderCard();
+        monitorMetricCards = metricCards();
+        monitorRttCard = sectionCard("RTT 趋势", chartHeader(), chartView());
+        monitorLossCard = sectionCard("丢包事件条", null, eventStrip());
+        monitorOverviewCard = overviewCard();
+        monitorPacketRecordsCard = packetRecordsCard();
+        View eventLog = eventLogCard();
+
+        monitorProbePanel = buildMonitorProbePanel();
+        monitorResponderPanel = buildMonitorResponderPanel();
+        scrollRoot.addView(monitorProbePanel);
+        scrollRoot.addView(monitorResponderPanel);
+        scrollRoot.addView(eventLog);
+
+        return stickyFooterPage(scrollRoot, btnRow);
+    }
+
+    private View buildMonitorProbePanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+
+        if (wideLayout) {
+            LinearLayout columns = new LinearLayout(this);
+            columns.setOrientation(LinearLayout.HORIZONTAL);
+
+            LinearLayout left = new LinearLayout(this);
+            left.setOrientation(LinearLayout.VERTICAL);
+            left.addView(monitorStatusPill);
+            left.addView(monitorMetricCards);
+            left.addView(monitorRttCard);
+            left.addView(monitorLossCard);
+
+            LinearLayout right = new LinearLayout(this);
+            right.setOrientation(LinearLayout.VERTICAL);
+            stripTopMargin(monitorOverviewCard);
+            right.addView(monitorOverviewCard);
+            right.addView(monitorPacketRecordsCard);
+
+            columns.addView(left, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f));
+            columns.addView(space(dp(TabletLayout.columnGapDp(wideLayout)), 1));
+            columns.addView(right, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
+            panel.addView(columns, matchWrap());
+        } else {
+            panel.addView(monitorStatusPill);
+            panel.addView(monitorMetricCards);
+            panel.addView(monitorRttCard);
+            panel.addView(monitorLossCard);
+            panel.addView(monitorOverviewCard);
+            panel.addView(monitorPacketRecordsCard);
+        }
+        return panel;
+    }
+
+    private View buildMonitorResponderPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setVisibility(View.GONE);
+        panel.addView(responderCard);
+        return panel;
     }
 
     private void setMonitorFinishedControls(boolean finished) {
         if (stopButton != null) {
             stopButton.setVisibility(finished ? View.GONE : View.VISIBLE);
+            LinearLayout.LayoutParams stopLp = (LinearLayout.LayoutParams) stopButton.getLayoutParams();
+            if (stopLp != null) {
+                stopLp.weight = finished ? 0f : 1f;
+                stopButton.setLayoutParams(stopLp);
+            }
+        }
+        if (monitorBtnSpacer != null) {
+            monitorBtnSpacer.setVisibility(finished ? View.GONE : View.VISIBLE);
         }
         if (viewResultButton != null) {
             viewResultButton.setVisibility(finished ? View.VISIBLE : View.GONE);
+            LinearLayout.LayoutParams resultLp = (LinearLayout.LayoutParams) viewResultButton.getLayoutParams();
+            if (resultLp != null) {
+                resultLp.weight = finished ? 1f : 1f;
+                viewResultButton.setLayoutParams(resultLp);
+            }
         }
     }
 
@@ -537,15 +1131,19 @@ public final class MainActivity extends Activity {
     // 探测端显示完整 RTT 卡片；回显端只显示回显状态卡与事件日志。
     private void setMonitorMode(boolean responder) {
         responderRunMode = responder;
-        int probeVis = responder ? View.GONE : View.VISIBLE;
-        int responderVis = responder ? View.VISIBLE : View.GONE;
-        if (monitorStatusPill != null) monitorStatusPill.setVisibility(probeVis);
-        if (monitorMetricCards != null) monitorMetricCards.setVisibility(probeVis);
-        if (monitorRttCard != null) monitorRttCard.setVisibility(probeVis);
-        if (monitorLossCard != null) monitorLossCard.setVisibility(probeVis);
-        if (monitorOverviewCard != null) monitorOverviewCard.setVisibility(probeVis);
-        if (monitorPacketRecordsCard != null) monitorPacketRecordsCard.setVisibility(probeVis);
-        if (responderCard != null) responderCard.setVisibility(responderVis);
+        if (monitorProbePanel != null) {
+            monitorProbePanel.setVisibility(responder ? View.GONE : View.VISIBLE);
+        }
+        if (monitorResponderPanel != null) {
+            monitorResponderPanel.setVisibility(responder ? View.VISIBLE : View.GONE);
+        }
+        if (responderCard != null) {
+            responderCard.setVisibility(responder ? View.VISIBLE : View.GONE);
+        }
+        if (eventLogHeightParams != null) {
+            int base = TabletLayout.eventLogHeightDp(wideLayout);
+            eventLogHeightParams.height = dp(responder ? base + (wideLayout ? 140 : 100) : base);
+        }
     }
 
     private void updateResponderUi(ProbeMetrics metrics) {
@@ -564,21 +1162,21 @@ public final class MainActivity extends Activity {
         sv.setBackgroundColor(BG);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(14), dp(14), dp(14), dp(24));
+        root.setPadding(
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingV(wideLayout)),
+                dp(TabletLayout.pagePaddingH(wideLayout)),
+                dp(TabletLayout.pagePaddingBottom(wideLayout)));
         sv.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
 
-        TextView title = text("测试结果", 20, INK, Typeface.BOLD);
+        TextView title = text("测试结果", wideLayout ? 22 : 20, INK, Typeface.BOLD);
         title.setPadding(dp(2), 0, dp(2), dp(10));
         root.addView(title);
 
         resultStatusView = text("暂无测试结果", 15, MUTED, Typeface.BOLD);
         resultStatusView.setPadding(dp(14), dp(12), dp(14), dp(12));
         resultStatusView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        statusParams.bottomMargin = dp(10);
-        root.addView(resultStatusView, statusParams);
 
         resultSummaryView = new TextView(this);
         resultSummaryView.setTextSize(13);
@@ -586,11 +1184,30 @@ public final class MainActivity extends Activity {
         resultSummaryView.setPadding(dp(14), dp(14), dp(14), dp(14));
         resultSummaryView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
         resultSummaryView.setText("暂无测试结果，请先运行一次测试");
-        LinearLayout.LayoutParams rsp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        rsp.bottomMargin = dp(10);
-        resultSummaryView.setLayoutParams(rsp);
-        root.addView(resultSummaryView);
+
+        if (wideLayout) {
+            LinearLayout summaryRow = new LinearLayout(this);
+            summaryRow.setOrientation(LinearLayout.HORIZONTAL);
+            summaryRow.addView(resultStatusView, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
+            summaryRow.addView(space(dp(12), 1));
+            summaryRow.addView(resultSummaryView, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f));
+            LinearLayout.LayoutParams rowParams = matchWrap();
+            rowParams.bottomMargin = dp(10);
+            summaryRow.setLayoutParams(rowParams);
+            root.addView(summaryRow);
+        } else {
+            LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            statusParams.bottomMargin = dp(10);
+            root.addView(resultStatusView, statusParams);
+            LinearLayout.LayoutParams rsp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            rsp.bottomMargin = dp(10);
+            resultSummaryView.setLayoutParams(rsp);
+            root.addView(resultSummaryView);
+        }
 
         compareView = new TextView(this);
         compareView.setTextSize(12);
@@ -612,14 +1229,14 @@ public final class MainActivity extends Activity {
         btnRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams brp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        brp.topMargin = dp(14);
+        brp.topMargin = dp(16);
         btnRow.setLayoutParams(brp);
         exportButton = button("导出结果", Palette.NEUTRAL_DARK, Color.WHITE);
         retestButton = button("再次测试", Palette.SURFACE_SUBTLE, INK);
         retestButton.setOnClickListener(v -> resetForRetest());
-        btnRow.addView(exportButton, new LinearLayout.LayoutParams(0, dp(48), 1));
-        btnRow.addView(space(dp(8), 1));
-        btnRow.addView(retestButton, new LinearLayout.LayoutParams(0, dp(48), 1));
+        btnRow.addView(exportButton, new LinearLayout.LayoutParams(0, buttonHeight(), 1));
+        btnRow.addView(space(dp(12), 1));
+        btnRow.addView(retestButton, new LinearLayout.LayoutParams(0, buttonHeight(), 1));
         root.addView(btnRow);
         return sv;
     }
@@ -658,14 +1275,35 @@ public final class MainActivity extends Activity {
             return;
         }
         resultSummaryView.setText(String.format(Locale.US,
-                "模式: %s   协议: %s\n服务器: %s\n\n" +
+                "模式: %s   协议: %s\n服务器: %s\n%s\n" +
                 "发包: %d   收包: %d   丢包率: %.1f%%\n" +
                 "Avg RTT: %.0fms   P95: %.0fms   P99: %.0fms\n" +
                 "最大连续丢包: %d   抖动: %.1fms",
                 mode, proto, server,
+                weakNetResultLine(),
                 metrics.sent, metrics.received, metrics.lossRate * 100,
                 metrics.avgRttMs, metrics.p95RttMs, metrics.p99RttMs,
                 metrics.maxBurstLoss, metrics.jitterMs));
+    }
+
+    private String weakNetResultLine() {
+        if (lastConfig == null || !lastConfig.weakNetProfile.isActive()) {
+            return "";
+        }
+        return "弱网模拟: " + lastConfig.weakNetProfile.displaySummary() + "\n\n";
+    }
+
+    private WeakNetProfile readWeakNetProfile() {
+        if (weakNetToolSpinner == null) {
+            return WeakNetProfile.empty();
+        }
+        return new WeakNetProfile(
+                weakNetToolSpinner.getSelectedItem().toString(),
+                weakNetLossInput.getText().toString().trim(),
+                weakNetDelayInput.getText().toString().trim(),
+                weakNetJitterInput.getText().toString().trim(),
+                weakNetNoteInput.getText().toString().trim()
+        );
     }
 
     private void populateResponderResultPage(ProbeFlowState.Outcome outcome, String message, ProbeMetrics metrics) {
@@ -690,44 +1328,97 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private View configCard() {
-        LinearLayout card = panel();
-        card.addView(label("测试配置"));
-        card.addView(protocolRow());
+    private View configConnectionSection() {
+        activeFieldTheme = Palette.SECTION_CONNECTION;
+        LinearLayout card = sectionPanel(Palette.SECTION_CONNECTION, true);
+        card.addView(sectionTitle("连接目标", "协议与服务器地址", Palette.SECTION_CONNECTION));
+
+        protocolSpinner = buildProtocolSpinner();
+        card.addView(field("协议", protocolSpinner, spinnerHeight()));
+
+        hostInput = compactInput(DEFAULT_SIDE_CAR_HOST);
+        hostSpinner = relayServerSpinner();
+        hostSpinner.setVisibility(View.GONE);
+        LinearLayout hostSwitcher = new LinearLayout(this);
+        hostSwitcher.setOrientation(LinearLayout.VERTICAL);
+        hostSwitcher.addView(hostInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, fieldInputHeight()));
+        hostSwitcher.addView(hostSpinner, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, spinnerHeight()));
+        portInput = compactInput("9001");
 
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
         row1.setPadding(0, dp(8), 0, 0);
+        row1.addView(field("服务器地址", hostSwitcher),
+                weightParam(wideLayout ? 1.5f : 1f, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        row1.addView(field("端口", portInput),
+                weightParam(0.45f, fieldRowHeight(), dp(3), 0, dp(3), 0));
         card.addView(row1);
+        hostSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                refreshHostSubtitle();
+            }
 
-        hostInput = compactInput(DEFAULT_SIDE_CAR_HOST);
-        portInput = compactInput("9001");
-        row1.addView(field("服务器地址", hostInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
-        row1.addView(field("端口", portInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        activeFieldTheme = null;
+        return card;
+    }
 
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        row2.setPadding(0, dp(8), 0, 0);
-        card.addView(row2);
+    private View configProbeSection() {
+        activeFieldTheme = Palette.SECTION_PROBE;
+        LinearLayout card = sectionPanel(Palette.SECTION_PROBE, false);
+        card.addView(sectionTitle("探测参数", "发包数量、速率与超时", Palette.SECTION_PROBE));
 
-        countInput = compactInput("500");
-        ppsInput = compactInput("20");
-        packetBytesInput = compactInput("200");
-        timeoutInput = compactInput("1200");
-        row2.addView(field("发包数", countInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
-        row2.addView(field("速率(包/秒)", ppsInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
-        row2.addView(field("包大小(字节)", packetBytesInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
-        row2.addView(field("超时ms", timeoutInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
+        countInput = compactInput(ProbeDefaults.COUNT);
+        ppsInput = compactInput(ProbeDefaults.PPS);
+        packetBytesInput = compactInput(ProbeDefaults.PACKET_BYTES);
+        timeoutInput = compactInput(ProbeDefaults.TIMEOUT_MS);
 
-        LinearLayout modeRow = new LinearLayout(this);
-        modeRow.setOrientation(LinearLayout.VERTICAL);
-        modeRow.setPadding(dp(3), dp(8), dp(3), 0);
-        TextView modeLabel = text("测试模式", 11, MUTED, Typeface.NORMAL);
+        if (wideLayout) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(0, dp(8), 0, 0);
+            row.addView(field("发包数", countInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            row.addView(field("速率(包/秒)", ppsInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            row.addView(field("包大小(字节)", packetBytesInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            row.addView(field("超时(ms)", timeoutInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            card.addView(row);
+        } else {
+            LinearLayout row1 = new LinearLayout(this);
+            row1.setOrientation(LinearLayout.HORIZONTAL);
+            row1.setPadding(0, dp(8), 0, 0);
+            row1.addView(field("发包数", countInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            row1.addView(field("速率(包/秒)", ppsInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            card.addView(row1);
+
+            LinearLayout row2 = new LinearLayout(this);
+            row2.setOrientation(LinearLayout.HORIZONTAL);
+            row2.setPadding(0, dp(8), 0, 0);
+            row2.addView(field("包大小(字节)", packetBytesInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            row2.addView(field("超时(ms)", timeoutInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+            card.addView(row2);
+        }
+        activeFieldTheme = null;
+        return card;
+    }
+
+    private View configModeSection() {
+        Palette.SectionTheme theme = Palette.SECTION_MODE;
+        activeFieldTheme = theme;
+        LinearLayout card = sectionPanel(theme, false);
+        card.addView(sectionTitle("测试模式", "对比未加速与云聚通加速效果", theme));
+
         modeSpinner = new Spinner(this);
         String[] modes = new String[]{"未加速", "云聚通加速", "弱网基线", "弱网加速"};
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, modes);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         modeSpinner.setAdapter(adapter);
+        modeSpinner.setVisibility(View.GONE);
         modeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
@@ -736,56 +1427,231 @@ public final class MainActivity extends Activity {
                     modeStatusView.setText(position == 0 || position == 2 ? "基线测试" : "双发加速");
                 }
                 refreshModeToggle();
+                refreshWeakNetSectionExpanded();
             }
 
             @Override
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
+
         LinearLayout toggleRow = new LinearLayout(this);
         toggleRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams tp = matchWrap();
-        tp.setMargins(0, dp(6), 0, dp(4));
+        tp.setMargins(dp(3), dp(8), dp(3), 0);
         toggleRow.setLayoutParams(tp);
-        modeBaselineButton = button("基线（未加速）", LINE, MUTED);
-        modeAccelButton = button("云聚通加速", BLUE, Color.WHITE);
+        modeBaselineButton = button("基线（未加速）", theme.innerBorder, MUTED);
+        modeAccelButton = button("云聚通加速", theme.accent, Color.WHITE);
         modeBaselineButton.setTextSize(12);
         modeAccelButton.setTextSize(12);
-        modeBaselineButton.setOnClickListener(v -> modeSpinner.setSelection(0));
-        modeAccelButton.setOnClickListener(v -> modeSpinner.setSelection(1));
-        toggleRow.addView(modeBaselineButton, new LinearLayout.LayoutParams(0, dp(48), 1));
+        modeBaselineButton.setOnClickListener(v -> setModeSelection(false));
+        modeAccelButton.setOnClickListener(v -> setModeSelection(true));
+        toggleRow.addView(modeBaselineButton, new LinearLayout.LayoutParams(0, modeButtonHeight(), 1));
         toggleRow.addView(space(dp(6), 1));
-        toggleRow.addView(modeAccelButton, new LinearLayout.LayoutParams(0, dp(48), 1));
+        toggleRow.addView(modeAccelButton, new LinearLayout.LayoutParams(0, modeButtonHeight(), 1));
+        card.addView(toggleRow);
 
-        modeRow.addView(modeLabel);
-        modeRow.addView(toggleRow);
-        modeRow.addView(modeSpinner, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(44)
-        ));
-        card.addView(modeRow);
-        card.addView(mqttConfigBlock());
-        updateProtocolUi();
-        refreshModeToggle();
+        LinearLayout weakNetRow = new LinearLayout(this);
+        weakNetRow.setOrientation(LinearLayout.HORIZONTAL);
+        weakNetRow.setGravity(Gravity.CENTER_VERTICAL);
+        weakNetRow.setPadding(dp(10), dp(10), dp(10), dp(6));
+        weakNetRow.setBackground(rounded(theme.innerSurface, theme.innerBorder, Palette.RADIUS_INNER));
+        LinearLayout.LayoutParams wnp = matchWrap();
+        wnp.setMargins(dp(3), dp(8), dp(3), 0);
+        weakNetRow.setLayoutParams(wnp);
+
+        LinearLayout weakNetLabels = new LinearLayout(this);
+        weakNetLabels.setOrientation(LinearLayout.VERTICAL);
+        weakNetLabels.addView(text("弱网场景", 13, theme.accent, Typeface.BOLD));
+        TextView weakNetHint = smallText("开启后对比弱网基线与弱网加速", MUTED, Typeface.NORMAL);
+        weakNetHint.setPadding(0, dp(2), 0, 0);
+        weakNetLabels.addView(weakNetHint);
+        weakNetRow.addView(weakNetLabels, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        weakNetSceneSwitch = new Switch(this);
+        weakNetSceneSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            int sel = modeSpinner.getSelectedItemPosition();
+            boolean accel = sel == 1 || sel == 3;
+            modeSpinner.setSelection(isChecked ? (accel ? 3 : 2) : (accel ? 1 : 0));
+            refreshWeakNetSectionExpanded();
+        });
+        weakNetRow.addView(weakNetSceneSwitch);
+        card.addView(weakNetRow);
+        activeFieldTheme = null;
         return card;
     }
 
-    private View protocolRow() {
-        LinearLayout protocolRow = new LinearLayout(this);
-        protocolRow.setOrientation(LinearLayout.VERTICAL);
-        protocolRow.setPadding(dp(3), dp(8), dp(3), 0);
-        protocolRow.addView(text("协议", 11, MUTED, Typeface.NORMAL));
+    private void setModeSelection(boolean accel) {
+        boolean weak = weakNetSceneSwitch != null && weakNetSceneSwitch.isChecked();
+        if (weak) {
+            modeSpinner.setSelection(accel ? 3 : 2);
+        } else {
+            modeSpinner.setSelection(accel ? 1 : 0);
+        }
+    }
 
-        protocolSpinner = new Spinner(this);
-        String[] protocols = new String[]{
-                ProbeConfig.Protocol.UDP.label,
-                ProbeConfig.Protocol.TCP.label,
-                ProbeConfig.Protocol.MQTT.label
+    private View configWeakNetSection() {
+        activeFieldTheme = Palette.SECTION_WEAK_NET;
+        View[] section = collapsibleSection(
+                "弱网模拟",
+                "Clumsy 等注入参数，写入 Summary 便于对比",
+                false,
+                Palette.SECTION_WEAK_NET
+        );
+        weakNetCollapsibleBody = (LinearLayout) section[1];
+        weakNetCollapsibleBody.addView(weakNetConfigBlock());
+        activeFieldTheme = null;
+        return section[0];
+    }
+
+    private void refreshWeakNetSectionExpanded() {
+        if (weakNetCollapsibleBody == null || modeSpinner == null) {
+            return;
+        }
+        int sel = modeSpinner.getSelectedItemPosition();
+        boolean weakScene = sel == 2 || sel == 3;
+        if (weakNetSceneSwitch != null && weakNetSceneSwitch.isChecked() != weakScene) {
+            weakNetSceneSwitch.setOnCheckedChangeListener(null);
+            weakNetSceneSwitch.setChecked(weakScene);
+            weakNetSceneSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                int current = modeSpinner.getSelectedItemPosition();
+                boolean accel = current == 1 || current == 3;
+                modeSpinner.setSelection(isChecked ? (accel ? 3 : 2) : (accel ? 1 : 0));
+                refreshWeakNetSectionExpanded();
+            });
+        }
+        setCollapsibleExpanded(weakNetCollapsibleBody, weakScene || hasWeakNetInput());
+    }
+
+    private boolean hasWeakNetInput() {
+        if (weakNetLossInput == null) {
+            return false;
+        }
+        return !weakNetLossInput.getText().toString().trim().isEmpty()
+                || !weakNetDelayInput.getText().toString().trim().isEmpty()
+                || !weakNetJitterInput.getText().toString().trim().isEmpty()
+                || !weakNetNoteInput.getText().toString().trim().isEmpty()
+                || (weakNetToolSpinner != null && weakNetToolSpinner.getSelectedItemPosition() > 0);
+    }
+
+    /** 可折叠区块：返回 [外层容器, 内容容器, chevron] */
+    private View[] collapsibleSection(String title, String subtitle, boolean expanded,
+                                      Palette.SectionTheme theme) {
+        return collapsibleSection(title, subtitle, expanded, true, theme);
+    }
+
+    private View[] collapsibleSection(String title, String subtitle, boolean expanded, boolean asPanel,
+                                      Palette.SectionTheme theme) {
+        LinearLayout wrapper = asPanel ? sectionPanel(theme, false) : new LinearLayout(this);
+        if (!asPanel) {
+            wrapper.setOrientation(LinearLayout.VERTICAL);
+        } else {
+            wrapper.setPadding(dp(14), dp(10), dp(14), dp(10));
+        }
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(2), dp(2), dp(2), dp(2));
+        if (!asPanel) {
+            header.setPadding(dp(10), dp(10), dp(10), dp(10));
+            header.setBackground(rounded(theme.innerSurface, theme.innerBorder, Palette.RADIUS_INNER));
+        }
+
+        View accentDot = new View(this);
+        accentDot.setBackground(rounded(theme.accent, theme.accent, 4));
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(4), dp(22));
+        dotParams.setMargins(0, 0, dp(8), 0);
+        accentDot.setLayoutParams(dotParams);
+        header.addView(accentDot);
+
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.addView(text(title, 13, theme.accent, Typeface.BOLD));
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView sub = smallText(subtitle, MUTED, Typeface.NORMAL);
+            sub.setPadding(0, dp(2), 0, 0);
+            titles.addView(sub);
+        }
+        header.addView(titles, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView chevron = text(expanded ? "▼" : "▶", 11, theme.accent, Typeface.NORMAL);
+        chevron.setPadding(dp(8), 0, dp(4), 0);
+        header.addView(chevron);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        body.setPadding(asPanel ? 0 : dp(3), dp(4), asPanel ? 0 : dp(3), 0);
+        body.setTag(chevron);
+
+        header.setOnClickListener(v -> {
+            boolean show = body.getVisibility() != View.VISIBLE;
+            setCollapsibleExpanded(body, show);
+        });
+
+        wrapper.addView(header);
+        wrapper.addView(body);
+        return new View[]{wrapper, body, chevron};
+    }
+
+    private void setCollapsibleExpanded(LinearLayout body, boolean expanded) {
+        body.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        Object tag = body.getTag();
+        if (tag instanceof TextView) {
+            ((TextView) tag).setText(expanded ? "▼" : "▶");
+        }
+    }
+
+    private View sectionTitle(String title, String subtitle, Palette.SectionTheme theme) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        View accentBar = new View(this);
+        accentBar.setBackground(rounded(theme.accent, theme.accent, 4));
+        row.addView(accentBar, new LinearLayout.LayoutParams(dp(4), dp(28)));
+
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.setPadding(dp(10), 0, 0, 0);
+        block.addView(text(title, 14, theme.accent, Typeface.BOLD));
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView sub = smallText(subtitle, MUTED, Typeface.NORMAL);
+            sub.setPadding(0, dp(2), 0, 0);
+            block.addView(sub);
+        }
+        row.addView(block, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        return row;
+    }
+
+    private Spinner buildProtocolSpinner() {
+        Spinner spinner = new Spinner(this);
+        ProbeConfig.Protocol[] protocols = ProbeConfig.Protocol.values();
+        String[] labels = new String[protocols.length];
+        for (int i = 0; i < protocols.length; i++) {
+            labels[i] = protocols[i].displayLabel();
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(
+                this, android.R.layout.simple_spinner_item, labels) {
+            @Override
+            public View getView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                styleProtocolSpinnerText(view, false);
+                return view;
+            }
+
+            @Override
+            public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView view = (TextView) super.getDropDownView(position, convertView, parent);
+                styleProtocolSpinnerText(view, true);
+                return view;
+            }
         };
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, protocols);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        protocolSpinner.setAdapter(adapter);
-        protocolSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+        spinner.setAdapter(adapter);
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 updateProtocolUi();
@@ -795,11 +1661,21 @@ public final class MainActivity extends Activity {
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
-        protocolRow.addView(protocolSpinner, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(44)
-        ));
-        return protocolRow;
+        return spinner;
+    }
+
+    private void styleProtocolSpinnerText(TextView view, boolean dropdown) {
+        view.setSingleLine(!dropdown);
+        view.setEllipsize(null);
+        view.setTextColor(INK);
+        view.setTextSize(dropdown ? 14 : 13);
+        view.setIncludeFontPadding(false);
+        view.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        if (dropdown) {
+            view.setPadding(dp(14), dp(12), dp(14), dp(12));
+        } else {
+            view.setPadding(0, 0, 0, 0);
+        }
     }
 
     private View mqttRoleRow() {
@@ -827,22 +1703,41 @@ public final class MainActivity extends Activity {
             }
         });
         mqttRoleRow.addView(mqttRoleSpinner, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+                LinearLayout.LayoutParams.MATCH_PARENT, spinnerHeight()));
 
-        TextView hint = smallText(
-                "回显端：订阅本机SN，收到对端探测包后原样转发到对端SN，替代 Python Echo 脚本。两台平板把「发布Topic / 订阅Topic」对调即可。",
-                MUTED, Typeface.NORMAL);
-        hint.setPadding(0, dp(6), 0, 0);
-        mqttRoleRow.addView(hint);
+        mqttRoleHintView = smallText(roleDescription(ProbeConfig.Role.PROBE), MUTED, Typeface.NORMAL);
+        mqttRoleHintView.setPadding(0, dp(6), 0, 0);
+        mqttRoleRow.addView(mqttRoleHintView);
         return mqttRoleRow;
     }
 
+    private String roleDescription(ProbeConfig.Role role) {
+        if (role == ProbeConfig.Role.RESPONDER) {
+            return "回显端：订阅本机 SN，收到探测包后原样转发到发送端 SN。先在回显端平板点「启动回显端」，再在探测端开始测试。";
+        }
+        return "探测端：向接收端 SN 发布探测包，订阅本机 SN 等待回包，统计 RTT、丢包与抖动。";
+    }
+
+    private String pairImportDescription(ProbeConfig.Role role) {
+        if (role == ProbeConfig.Role.RESPONDER) {
+            return "导入后写入接收端凭据：本机 SN=接收端，发布 Topic=发送端 SN，订阅 Topic=接收端 SN。";
+        }
+        return "导入后写入发送端凭据：本机 SN=发送端，发布 Topic=接收端 SN，订阅 Topic=发送端 SN。";
+    }
+
     private void updateMqttRoleHint() {
+        ProbeConfig.Role role = selectedMqttRole();
+        if (mqttRoleHintView != null) {
+            mqttRoleHintView.setText(roleDescription(role));
+        }
+        if (mqttPairImportHintView != null) {
+            mqttPairImportHintView.setText(pairImportDescription(role));
+        }
         if (startButton == null) {
             return;
         }
         if (selectedProtocol() == ProbeConfig.Protocol.MQTT
-                && selectedMqttRole() == ProbeConfig.Role.RESPONDER) {
+                && role == ProbeConfig.Role.RESPONDER) {
             startButton.setText("启动回显端");
         } else {
             startButton.setText("开始测试");
@@ -856,16 +1751,215 @@ public final class MainActivity extends Activity {
         return ProbeConfig.Role.RESPONDER;
     }
 
-    private View mqttConfigBlock() {
-        mqttConfigContainer = new LinearLayout(this);
-        mqttConfigContainer.setOrientation(LinearLayout.VERTICAL);
-        mqttConfigContainer.setPadding(0, dp(8), 0, 0);
+    private View mqttPairImportRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(3), 0, dp(3), dp(8));
 
-        TextView title = label("MQTT 配置");
-        title.setPadding(dp(3), 0, dp(3), dp(6));
-        mqttConfigContainer.addView(title);
+        Button importButton = button("快速导入双平板配置",
+                Palette.SECTION_MQTT.innerSurface, Palette.SECTION_MQTT.accent);
+        importButton.setOnClickListener(v -> showMqttPairImportDialog());
+        row.addView(importButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, buttonHeight()));
+
+        mqttPairImportHintView = smallText(pairImportDescription(selectedMqttRole()), MUTED, Typeface.NORMAL);
+        mqttPairImportHintView.setPadding(0, dp(6), 0, 0);
+        row.addView(mqttPairImportHintView);
+        return row;
+    }
+
+    private void showMqttPairImportDialog() {
+        MqttPairProfile saved = MqttPairProfile.fromPreferences(getSharedPreferences(PREFS, MODE_PRIVATE));
+
+        EditText envInput = compactInput(saved.env);
+        Spinner hostSpinnerDialog = relayServerSpinner();
+        hostSpinnerDialog.setSelection(MqttRelayServerCatalog.indexOfHost(saved.host));
+        EditText senderSnInput = compactInput(saved.senderSn);
+        EditText senderPwdInput = compactInput(saved.senderPwd);
+        senderPwdInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText senderMacInput = compactInput(saved.senderMac);
+        EditText receiverSnInput = compactInput(saved.receiverSn);
+        EditText receiverPwdInput = compactInput(saved.receiverPwd);
+        receiverPwdInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText receiverMacInput = compactInput(saved.receiverMac);
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(4), dp(4), dp(4), dp(4));
+        form.addView(dialogSectionTitle("共享 · Broker"));
+        form.addView(dialogFieldRow(
+                dialogField("环境", envInput, 0.6f),
+                dialogSpinnerField("Broker 中转", hostSpinnerDialog, 1.4f),
+                dialogFixedField("端口", MqttRelayServerCatalog.PORT, 0.5f)
+        ));
+        form.addView(dialogSectionTitle("发送端 · 探测端（主动发包）"));
+        form.addView(dialogFieldRow(
+                dialogField("SN", senderSnInput, 1.2f),
+                dialogField("密码", senderPwdInput, 1f),
+                dialogField("MAC", senderMacInput, 1f)
+        ));
+        form.addView(dialogSectionTitle("接收端 · 回显端（收到后回发）"));
+        form.addView(dialogFieldRow(
+                dialogField("SN", receiverSnInput, 1.2f),
+                dialogField("密码", receiverPwdInput, 1f),
+                dialogField("MAC", receiverMacInput, 1f)
+        ));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(form);
+
+        ProbeConfig.Role role = selectedMqttRole();
+        String roleHint = role == ProbeConfig.Role.PROBE ? "探测端" : "回显端";
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("双平板 MQTT 快速配置")
+                .setMessage("填写两端设备信息后导入。将按当前本机角色「" + roleHint + "」写入主表单。")
+                .setView(scroll)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("导入并应用", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                MqttPairProfile profile = new MqttPairProfile(
+                        envInput.getText().toString().trim(),
+                        MqttRelayServerCatalog.hostAt(hostSpinnerDialog.getSelectedItemPosition()),
+                        MqttRelayServerCatalog.PORT,
+                        senderSnInput.getText().toString().trim(),
+                        senderPwdInput.getText().toString(),
+                        senderMacInput.getText().toString().trim(),
+                        receiverSnInput.getText().toString().trim(),
+                        receiverPwdInput.getText().toString(),
+                        receiverMacInput.getText().toString().trim()
+                );
+                String error = profile.validate();
+                if (error != null) {
+                    Toast.makeText(this, error, Toast.LENGTH_LONG).show();
+                    return;
+                }
+                applyMqttPairProfile(profile);
+                dialog.dismiss();
+            });
+        });
+        dialog.show();
+    }
+
+    private TextView dialogSectionTitle(String title) {
+        TextView view = text(title, 11, MUTED, Typeface.BOLD);
+        view.setPadding(dp(3), dp(10), dp(3), dp(4));
+        return view;
+    }
+
+    private LinearLayout dialogFieldRow(View... fields) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(0, dp(4), 0, 0);
+        for (View field : fields) {
+            row.addView(field);
+        }
+        return row;
+    }
+
+    private View dialogField(String label, EditText input, float weight) {
+        View container = field(label, input);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, weight);
+        params.setMargins(dp(3), 0, dp(3), 0);
+        container.setLayoutParams(params);
+        return container;
+    }
+
+    private View dialogSpinnerField(String label, Spinner spinner, float weight) {
+        View container = field(label, spinner, dp(44));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, weight);
+        params.setMargins(dp(3), 0, dp(3), 0);
+        container.setLayoutParams(params);
+        return container;
+    }
+
+    private View dialogFixedField(String label, String value, float weight) {
+        TextView valueView = text(value, 13, INK, Typeface.NORMAL);
+        valueView.setPadding(0, dp(8), 0, 0);
+        View container = field(label, valueView, dp(32));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, weight);
+        params.setMargins(dp(3), 0, dp(3), 0);
+        container.setLayoutParams(params);
+        return container;
+    }
+
+    private void applyMqttPairProfile(MqttPairProfile profile) {
+        ProbeConfig.Role role = selectedMqttRole();
+        profile.saveTo(getSharedPreferences(PREFS, MODE_PRIVATE).edit());
+
+        protocolSpinner.setSelection(ProbeConfig.Protocol.MQTT.ordinal());
+        setSelectedHost(profile.host);
+        portInput.setText(profile.port);
+        mqttEnvInput.setText(profile.env);
+        mqttClientIdInput.setText(profile.localSn(role));
+        mqttPublishTopicInput.setText(profile.publishTopic(role));
+        mqttSubscribeTopicInput.setText(profile.subscribeTopic(role));
+        mqttDevicePwdInput.setText(profile.localPwd(role));
+        mqttDeviceMacInput.setText(profile.localMac(role));
+        mqttPasswordInput.setText("");
+        refreshMqttUsernameFromEnv();
+        updateProtocolUi();
+        updateMqttRoleHint();
+        saveCurrentConfig();
+
+        String roleLabel = role == ProbeConfig.Role.PROBE ? "探测端" : "回显端";
+        Toast.makeText(this,
+                "已按「" + roleLabel + "」导入：本机 " + profile.localSn(role)
+                        + " → 对端 " + profile.publishTopic(role),
+                Toast.LENGTH_LONG).show();
+    }
+
+    private View weakNetConfigBlock() {
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.setPadding(dp(3), 0, dp(3), 0);
+
+        weakNetToolSpinner = new Spinner(this);
+        ArrayAdapter<String> toolAdapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, WeakNetProfile.TOOL_OPTIONS);
+        toolAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        weakNetToolSpinner.setAdapter(toolAdapter);
+        block.addView(field("模拟工具", weakNetToolSpinner, spinnerHeight()));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(0, dp(8), 0, 0);
+        weakNetLossInput = compactInput("");
+        weakNetLossInput.setHint("如 10");
+        weakNetDelayInput = compactInput("");
+        weakNetDelayInput.setHint("如 30");
+        weakNetJitterInput = compactInput("");
+        weakNetJitterInput.setHint("如 10");
+        row.addView(field("丢包%", weakNetLossInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        row.addView(field("延迟ms", weakNetDelayInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        row.addView(field("抖动ms", weakNetJitterInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        block.addView(row);
+
+        weakNetNoteInput = compactInput("");
+        weakNetNoteInput.setHint("过滤器、注入位置等，如 outbound *.1883");
+        View noteField = field("备注", weakNetNoteInput, fieldInputHeight());
+        LinearLayout.LayoutParams noteParams = matchWrap();
+        noteParams.topMargin = dp(8);
+        noteField.setLayoutParams(noteParams);
+        block.addView(noteField);
+        return block;
+    }
+
+    private View mqttConfigBlock() {
+        Palette.SectionTheme theme = Palette.SECTION_MQTT;
+        activeFieldTheme = theme;
+        mqttConfigContainer = sectionPanel(theme, false);
+        mqttConfigContainer.setVisibility(View.GONE);
+
+        mqttConfigContainer.addView(sectionTitle("MQTT 配置", "双平板互测 · 角色与 Topic 互为镜像", theme));
 
         mqttConfigContainer.addView(mqttRoleRow());
+        mqttConfigContainer.addView(mqttPairImportRow());
 
         mqttEnvInput = compactInput(MqttDefaultProfile.ENV);
         mqttClientIdInput = compactInput(MqttDefaultProfile.CLIENT_ID);
@@ -880,42 +1974,76 @@ public final class MainActivity extends Activity {
 
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
-        row1.addView(field("环境", mqttEnvInput), weightParam(0.7f, dp(58), dp(3), 0, dp(3), 0));
-        row1.addView(field("本机SN(ClientId)", mqttClientIdInput), weightParam(1.2f, dp(58), dp(3), 0, dp(3), 0));
-        row1.addView(field("发布Topic(对方SN)", mqttPublishTopicInput), weightParam(1.2f, dp(58), dp(3), 0, dp(3), 0));
+        row1.setPadding(0, dp(8), 0, 0);
+        row1.addView(field("环境", mqttEnvInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        row1.addView(field("本机 SN", mqttClientIdInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
         mqttConfigContainer.addView(row1);
 
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setPadding(0, dp(8), 0, 0);
-        row2.addView(field("订阅Topic(本机SN)", mqttSubscribeTopicInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
-        row2.addView(field("设备密码", mqttDevicePwdInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
-        row2.addView(field("WiFi MAC地址", mqttDeviceMacInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
+        row2.addView(field("发布 Topic(对端 SN)", mqttPublishTopicInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        row2.addView(field("订阅 Topic(本机 SN)", mqttSubscribeTopicInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
         mqttConfigContainer.addView(row2);
 
         LinearLayout row3 = new LinearLayout(this);
         row3.setOrientation(LinearLayout.HORIZONTAL);
         row3.setPadding(0, dp(8), 0, 0);
-        row3.addView(field("用户名(域名/api)", mqttUsernameInput), weightParam(1.2f, dp(58), dp(3), 0, dp(3), 0));
-        row3.addView(field("Token(自动预取)", mqttPasswordInput), weightParam(1, dp(58), dp(3), 0, dp(3), 0));
+        row3.addView(field("设备密码", mqttDevicePwdInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        row3.addView(field("WiFi MAC", mqttDeviceMacInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
         mqttConfigContainer.addView(row3);
 
-        TextView hint = smallText("用户名随环境自动更新；进入本页后 Token 将自动预取（依赖 SN/设备密码/MAC）", MUTED, Typeface.NORMAL);
+        View[] advanced = collapsibleSection(
+                "连接凭据",
+                "用户名与 Token，通常可自动预取",
+                false,
+                false,
+                theme
+        );
+        mqttAdvancedBody = (LinearLayout) advanced[1];
+        LinearLayout credRow = new LinearLayout(this);
+        credRow.setOrientation(LinearLayout.HORIZONTAL);
+        credRow.addView(field("用户名", mqttUsernameInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        credRow.addView(field("Token", mqttPasswordInput), weightParam(1, fieldRowHeight(), dp(3), 0, dp(3), 0));
+        mqttAdvancedBody.addView(credRow);
+
+        TextView hint = smallText("用户名随环境自动更新；Token 依赖 SN / 设备密码 / MAC 自动预取", MUTED, Typeface.NORMAL);
         hint.setPadding(dp(3), dp(6), dp(3), 0);
-        mqttConfigContainer.addView(hint);
+        mqttAdvancedBody.addView(hint);
+
+        LinearLayout.LayoutParams advParams = matchWrap();
+        advParams.setMargins(0, dp(8), 0, 0);
+        advanced[0].setLayoutParams(advParams);
+        mqttConfigContainer.addView(advanced[0]);
+
         installMqttConfigListeners();
+        activeFieldTheme = null;
         return mqttConfigContainer;
     }
 
     private View field(String label, EditText input) {
+        return field(label, (View) input, fieldInputHeight());
+    }
+
+    private View field(String label, View input) {
+        return field(label, input, fieldInputHeight());
+    }
+
+    private View field(String label, View input, int inputHeight) {
         LinearLayout field = new LinearLayout(this);
         field.setOrientation(LinearLayout.VERTICAL);
         field.setPadding(dp(10), dp(7), dp(10), dp(6));
-        field.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, Palette.RADIUS_INNER));
-        field.addView(text(label, 10, MUTED, Typeface.NORMAL));
+        if (activeFieldTheme != null) {
+            Palette.SectionTheme theme = activeFieldTheme;
+            field.setBackground(rounded(theme.innerSurface, theme.innerBorder, Palette.RADIUS_INNER));
+            field.addView(text(label, 10, theme.accent, Typeface.NORMAL));
+        } else {
+            field.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, Palette.RADIUS_INNER));
+            field.addView(text(label, 10, MUTED, Typeface.NORMAL));
+        }
         field.addView(input, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(32)
+                inputHeight
         ));
         return field;
     }
@@ -934,7 +2062,7 @@ public final class MainActivity extends Activity {
             validateProtocolConfig(protocol);
             lastConfig = new ProbeConfig(
                     protocol,
-                    hostInput.getText().toString().trim(),
+                    selectedHost(),
                     parseInt(portInput, "端口", 1, 65535),
                     parseInt(countInput, "发包数量", 1, 200000),
                     parseInt(ppsInput, "每秒发包数", 1, 2000),
@@ -951,7 +2079,8 @@ public final class MainActivity extends Activity {
                     mqttEnvInput.getText().toString().trim(),
                     mqttDevicePwdInput.getText().toString(),
                     mqttDeviceMacInput.getText().toString().trim(),
-                    role
+                    role,
+                    readWeakNetProfile()
             );
             saveCurrentConfig();
             runner = createRunner(protocol, role);
@@ -977,6 +2106,9 @@ public final class MainActivity extends Activity {
                 if (stopButton != null) stopButton.setText("停止回显");
             } else {
                 appendEvent("正在连接 " + lastConfig.host + ":" + lastConfig.port + "…");
+                if (lastConfig.weakNetProfile.isActive()) {
+                    appendEvent("弱网模拟: " + lastConfig.weakNetProfile.displaySummary());
+                }
                 if (stopButton != null) stopButton.setText("停止测试");
             }
             if (metricsLineView != null) metricsLineView.setText("");
@@ -1125,7 +2257,8 @@ public final class MainActivity extends Activity {
     private void appendEvent(String message) {
         if (eventLogView == null) return;
         eventLines.add(message);
-        while (eventLines.size() > MAX_EVENT_LINES) {
+        int maxLines = responderRunMode ? MAX_RESPONDER_EVENT_LINES : MAX_EVENT_LINES;
+        while (eventLines.size() > maxLines) {
             eventLines.remove(0);
         }
         eventLogView.setText(String.join("\n", eventLines));
@@ -1235,9 +2368,18 @@ public final class MainActivity extends Activity {
             if (userInitiated) Toast.makeText(this, "暂无可导出的采样数据", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (!ensureStoragePermission(true)) {
+            if (userInitiated) {
+                Toast.makeText(this, "请授予存储权限以导出到 Download 目录", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
         try {
             File[] files = ProbeStorage.writeRun(this, lastConfig, lastMetrics, new ArrayList<>(lastSamples));
-            exportView.setText("CSV: " + files[0].getAbsolutePath() + "\nSummary: " + files[1].getAbsolutePath());
+            exportView.setText("已导出至 " + ProbeStorage.downloadsDisplayPath() + "/"
+                    + files[0].getParentFile().getName() + "/\n"
+                    + "CSV: " + files[0].getName() + "\n"
+                    + "Summary: " + files[1].getName());
             exportButton.setText("再次导出");
             exportButton.setEnabled(true);
             exportButton.setAlpha(1f);
@@ -1270,19 +2412,39 @@ public final class MainActivity extends Activity {
         card.addView(header);
         card.addView(body, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                title.equals("RTT 趋势") ? dp(114) : dp(54)
+                title.startsWith("RTT") ? dp(TabletLayout.rttChartHeightDp(wideLayout)) : dp(54)
         ));
         return card;
     }
 
     private LinearLayout panel() {
+        return panel(false);
+    }
+
+    private LinearLayout panel(boolean first) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(14), dp(12), dp(14), dp(12));
         panel.setBackground(rounded(SURFACE, LINE, Palette.RADIUS_CARD));
-        panel.setElevation(dp(1));
+        panel.setElevation(0);
         LinearLayout.LayoutParams params = matchWrap();
-        params.setMargins(0, dp(12), 0, 0);
+        if (!first) {
+            params.setMargins(0, dp(TabletLayout.sectionGapDp(wideLayout)), 0, 0);
+        }
+        panel.setLayoutParams(params);
+        return panel;
+    }
+
+    private LinearLayout sectionPanel(Palette.SectionTheme theme, boolean first) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.setBackground(rounded(theme.surface, theme.border, Palette.RADIUS_CARD));
+        panel.setElevation(0);
+        LinearLayout.LayoutParams params = matchWrap();
+        if (!first) {
+            params.setMargins(0, dp(TabletLayout.sectionGapDp(wideLayout)), 0, 0);
+        }
         panel.setLayoutParams(params);
         return panel;
     }
@@ -1306,6 +2468,43 @@ public final class MainActivity extends Activity {
         return view;
     }
 
+    private Spinner relayServerSpinner() {
+        Spinner spinner = new Spinner(this);
+        String[] labels = MqttRelayServerCatalog.labels();
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setSelection(MqttRelayServerCatalog.defaultIndex());
+        return spinner;
+    }
+
+    private String selectedHost() {
+        if (selectedProtocol() == ProbeConfig.Protocol.MQTT && hostSpinner != null) {
+            return MqttRelayServerCatalog.hostAt(hostSpinner.getSelectedItemPosition());
+        }
+        return hostInput.getText().toString().trim();
+    }
+
+    private void setSelectedHost(String host) {
+        if (hostSpinner != null) {
+            hostSpinner.setSelection(MqttRelayServerCatalog.indexOfHost(host));
+        }
+        if (hostInput != null) {
+            hostInput.setText(host);
+        }
+    }
+
+    private void refreshHostSubtitle() {
+        if (headerSubtitleView == null || protocolSpinner == null) {
+            return;
+        }
+        ProbeConfig.Protocol protocol = selectedProtocol();
+        String h = selectedHost();
+        String p = portInput != null ? portInput.getText().toString().trim() : "";
+        String dest = (!h.isEmpty() && !p.isEmpty()) ? " → " + h + ":" + p : "";
+        headerSubtitleView.setText(protocol.displayLabel() + dest);
+    }
+
     private EditText compactInput(String value) {
         EditText input = new EditText(this);
         input.setText(value);
@@ -1324,12 +2523,12 @@ public final class MainActivity extends Activity {
         button.setTextColor(foreground);
         button.setAllCaps(false);
         button.setBackground(buttonBackground(background));
-        button.setMinHeight(dp(48));
+        button.setMinHeight(buttonHeight());
         button.setMinWidth(0);
         button.setPadding(dp(8), 0, dp(8), 0);
         button.setStateListAnimator(null);
         // 实色按钮加轻微高度营造层次；浅色（次级）按钮保持扁平。
-        button.setElevation(isLight(background) ? 0f : dp(2));
+        button.setElevation(isLight(background) ? 0f : dp(1));
         return button;
     }
 
@@ -1417,14 +2616,18 @@ public final class MainActivity extends Activity {
 
     private void refreshModeToggle() {
         if (modeBaselineButton == null || modeAccelButton == null || modeSpinner == null) return;
+        Palette.SectionTheme theme = Palette.SECTION_MODE;
         int sel = modeSpinner.getSelectedItemPosition();
         boolean isBaseline = (sel == 0 || sel == 2);
-        modeBaselineButton.setBackground(buttonBackground(isBaseline ? INK : Palette.SURFACE_SUBTLE));
+        boolean weakScene = sel == 2 || sel == 3;
+        modeBaselineButton.setText(weakScene ? "弱网基线" : "基线（未加速）");
+        modeAccelButton.setText(weakScene ? "弱网加速" : "云聚通加速");
+        modeBaselineButton.setBackground(buttonBackground(isBaseline ? theme.accent : theme.innerSurface));
         modeBaselineButton.setTextColor(isBaseline ? Color.WHITE : MUTED);
-        modeBaselineButton.setElevation(isBaseline ? dp(2) : 0f);
-        modeAccelButton.setBackground(buttonBackground(isBaseline ? Palette.SURFACE_SUBTLE : BLUE));
+        modeBaselineButton.setElevation(isBaseline ? dp(1) : 0f);
+        modeAccelButton.setBackground(buttonBackground(isBaseline ? theme.innerSurface : theme.accent));
         modeAccelButton.setTextColor(isBaseline ? MUTED : Color.WHITE);
-        modeAccelButton.setElevation(isBaseline ? 0f : dp(2));
+        modeAccelButton.setElevation(isBaseline ? 0f : dp(1));
     }
 
     private void updateCompare(ProbeMetrics current, ProbeConfig cfg) {
@@ -1523,45 +2726,53 @@ public final class MainActivity extends Activity {
         if (mqttConfigContainer != null) {
             mqttConfigContainer.setVisibility(protocol == ProbeConfig.Protocol.MQTT ? View.VISIBLE : View.GONE);
         }
-        if (headerSubtitleView != null) {
-            String h = hostInput != null ? hostInput.getText().toString().trim() : "";
-            String p = portInput != null ? portInput.getText().toString().trim() : "";
-            String dest = (!h.isEmpty() && !p.isEmpty()) ? " → " + h + ":" + p : "";
-            headerSubtitleView.setText(protocol.label + dest);
+        boolean mqtt = protocol == ProbeConfig.Protocol.MQTT;
+        if (hostInput != null) {
+            hostInput.setVisibility(mqtt ? View.GONE : View.VISIBLE);
         }
-        if (portInput.getText().toString().trim().isEmpty()
-                || portInput.getText().toString().trim().equals("9001")
-                || portInput.getText().toString().trim().equals("9002")
-                || portInput.getText().toString().trim().equals(MqttDefaultProfile.PORT)) {
-            if (protocol == ProbeConfig.Protocol.UDP) {
-                portInput.setText("9001");
-            } else if (protocol == ProbeConfig.Protocol.TCP) {
-                portInput.setText("9002");
-            } else {
-                portInput.setText(MqttDefaultProfile.PORT);
+        if (hostSpinner != null) {
+            hostSpinner.setVisibility(mqtt ? View.VISIBLE : View.GONE);
+        }
+        if (mqtt) {
+            portInput.setText(MqttRelayServerCatalog.PORT);
+            portInput.setEnabled(false);
+            portInput.setFocusable(false);
+        } else {
+            portInput.setEnabled(true);
+            portInput.setFocusable(true);
+            portInput.setFocusableInTouchMode(true);
+            if (portInput.getText().toString().trim().isEmpty()
+                    || portInput.getText().toString().trim().equals("9001")
+                    || portInput.getText().toString().trim().equals("9002")
+                    || portInput.getText().toString().trim().equals(MqttRelayServerCatalog.PORT)) {
+                if (protocol == ProbeConfig.Protocol.UDP) {
+                    portInput.setText("9001");
+                } else {
+                    portInput.setText("9002");
+                }
             }
-        }
-        String host = hostInput.getText().toString().trim();
-        if (host.isEmpty() || host.equals(DEFAULT_SIDE_CAR_HOST) || host.equals(MqttDefaultProfile.HOST)) {
-            if (protocol == ProbeConfig.Protocol.UDP) {
+            String host = hostInput.getText().toString().trim();
+            if (host.isEmpty() || MqttRelayServerCatalog.isKnownHost(host)) {
                 hostInput.setText(DEFAULT_SIDE_CAR_HOST);
-            } else {
-                hostInput.setText(MqttDefaultProfile.HOST);
             }
         }
+        refreshHostSubtitle();
         if (protocol == ProbeConfig.Protocol.MQTT) {
             refreshMqttUsernameFromEnv();
             scheduleMqttTokenPrefetch();
         }
         if (abbaStatusView != null) {
             String mode = modeSpinner != null ? modeSpinner.getSelectedItem().toString() : "";
-            abbaStatusView.setText(mode.isEmpty() ? protocol.label : mode);
+            abbaStatusView.setText(mode.isEmpty() ? protocol.displayLabel() : mode);
         }
         updateMqttRoleHint();
     }
 
     private void validateProtocolConfig(ProbeConfig.Protocol protocol) {
-        if (hostInput.getText().toString().trim().isEmpty()) {
+        if (selectedHost().isEmpty()) {
+            if (protocol == ProbeConfig.Protocol.MQTT) {
+                throw new IllegalArgumentException("请选择中转服务器");
+            }
             failField(hostInput, "服务器地址不能为空");
         }
         if (protocol == ProbeConfig.Protocol.MQTT) {
@@ -1730,6 +2941,7 @@ public final class MainActivity extends Activity {
     private void loadSavedConfig() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         migrateMqttDefaultProfile(prefs);
+        ProbeDefaults.migrateIfNeeded(prefs);
         if (!prefs.contains("host")) {
             return;
         }
@@ -1741,14 +2953,15 @@ public final class MainActivity extends Activity {
         if (mqttRoleSpinner != null) {
             mqttRoleSpinner.setSelection(roleIndex);
         }
-        hostInput.setText(prefs.getString("host", protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX
-                ? MqttDefaultProfile.HOST : DEFAULT_SIDE_CAR_HOST));
+        String savedHost = prefs.getString("host", protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX
+                ? MqttDefaultProfile.HOST : DEFAULT_SIDE_CAR_HOST);
+        setSelectedHost(savedHost);
         portInput.setText(prefs.getString("port", protocolIndex == 1 ? "9002"
-                : protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX ? MqttDefaultProfile.PORT : "9001"));
-        countInput.setText(prefs.getString("count", "500"));
-        ppsInput.setText(prefs.getString("pps", "20"));
-        packetBytesInput.setText(prefs.getString("packetBytes", "200"));
-        timeoutInput.setText(prefs.getString("timeoutMs", "1200"));
+                : protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX ? MqttRelayServerCatalog.PORT : "9001"));
+        countInput.setText(prefs.getString("count", ProbeDefaults.COUNT));
+        ppsInput.setText(prefs.getString("pps", ProbeDefaults.PPS));
+        packetBytesInput.setText(prefs.getString("packetBytes", ProbeDefaults.PACKET_BYTES));
+        timeoutInput.setText(prefs.getString("timeoutMs", ProbeDefaults.TIMEOUT_MS));
         mqttClientIdInput.setText(prefs.getString("mqttClientId", MqttDefaultProfile.CLIENT_ID));
         mqttPublishTopicInput.setText(prefs.getString("mqttPublishTopic", MqttDefaultProfile.PUBLISH_TOPIC));
         mqttSubscribeTopicInput.setText(prefs.getString("mqttSubscribeTopic", MqttDefaultProfile.SUBSCRIBE_TOPIC));
@@ -1758,8 +2971,10 @@ public final class MainActivity extends Activity {
         mqttEnvInput.setText(prefs.getString("mqttEnv", MqttDefaultProfile.ENV));
         mqttDevicePwdInput.setText(prefs.getString("mqttDevicePwd", MqttDefaultProfile.DEVICE_PASSWORD));
         mqttDeviceMacInput.setText(prefs.getString("mqttDeviceMac", MqttDefaultProfile.DEVICE_MAC));
+        loadWeakNetConfig(prefs);
         updateProtocolUi();
         refreshModeToggle();
+        refreshWeakNetSectionExpanded();
     }
 
     private void migrateMqttDefaultProfile(SharedPreferences prefs) {
@@ -1784,12 +2999,11 @@ public final class MainActivity extends Activity {
     }
 
     private void saveCurrentConfig() {
-        getSharedPreferences(PREFS, MODE_PRIVATE)
-                .edit()
-                .putInt("protocol", protocolSpinner.getSelectedItemPosition())
+        SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        editor.putInt("protocol", protocolSpinner.getSelectedItemPosition())
                 .putInt("mode", modeSpinner.getSelectedItemPosition())
                 .putInt("mqttRole", mqttRoleSpinner == null ? 0 : mqttRoleSpinner.getSelectedItemPosition())
-                .putString("host", hostInput.getText().toString().trim())
+                .putString("host", selectedHost())
                 .putString("port", portInput.getText().toString().trim())
                 .putString("count", countInput.getText().toString().trim())
                 .putString("pps", ppsInput.getText().toString().trim())
@@ -1802,12 +3016,64 @@ public final class MainActivity extends Activity {
                 .putString("mqttPassword", currentMqttToken())
                 .putString("mqttEnv", mqttEnvInput.getText().toString().trim())
                 .putString("mqttDevicePwd", mqttDevicePwdInput.getText().toString())
-                .putString("mqttDeviceMac", mqttDeviceMacInput.getText().toString().trim())
-                .apply();
+                .putString("mqttDeviceMac", mqttDeviceMacInput.getText().toString().trim());
+        saveWeakNetConfig(editor);
+        editor.apply();
+    }
+
+    private void loadWeakNetConfig(SharedPreferences prefs) {
+        if (weakNetToolSpinner == null) {
+            return;
+        }
+        WeakNetProfile profile = WeakNetProfile.fromPreferences(prefs);
+        int toolIndex = 0;
+        for (int i = 0; i < WeakNetProfile.TOOL_OPTIONS.length; i++) {
+            if (WeakNetProfile.TOOL_OPTIONS[i].equals(profile.tool)) {
+                toolIndex = i;
+                break;
+            }
+        }
+        weakNetToolSpinner.setSelection(toolIndex);
+        weakNetLossInput.setText(profile.lossPercent);
+        weakNetDelayInput.setText(profile.delayMs);
+        weakNetJitterInput.setText(profile.jitterMs);
+        weakNetNoteInput.setText(profile.note);
+    }
+
+    private void saveWeakNetConfig(SharedPreferences.Editor editor) {
+        if (weakNetToolSpinner == null) {
+            return;
+        }
+        WeakNetProfile profile = readWeakNetProfile();
+        editor.putString("weakNetTool", profile.tool)
+                .putString("weakNetLossPercent", profile.lossPercent)
+                .putString("weakNetDelayMs", profile.delayMs)
+                .putString("weakNetJitterMs", profile.jitterMs)
+                .putString("weakNetNote", profile.note);
     }
 
     private int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private int buttonHeight() {
+        return dp(TabletLayout.buttonHeightDp(wideLayout));
+    }
+
+    private int modeButtonHeight() {
+        return dp(TabletLayout.modeButtonHeightDp(wideLayout));
+    }
+
+    private int fieldInputHeight() {
+        return dp(TabletLayout.fieldInputHeightDp(wideLayout));
+    }
+
+    private int spinnerHeight() {
+        return dp(TabletLayout.spinnerHeightDp(wideLayout));
+    }
+
+    private int fieldRowHeight() {
+        return dp(TabletLayout.fieldRowHeightDp(wideLayout));
     }
 
     private int dp(int value) {

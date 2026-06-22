@@ -9,6 +9,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,6 +30,11 @@ final class MqttResponderRunner implements ProbeRunner {
     private static final int MQTT_PINGREQ = 12;
     private static final int MQTT_SUBSCRIBE = 8;
     private static final int MQTT_DISCONNECT = 14;
+    /** 联调期：前 N 条逐条记日志，便于确认首包与早期节奏。 */
+    private static final int DETAILED_LOG_MAX_COUNT = 10;
+    /** 联调期：启动后一段时间内逐条记日志（与高 PPS 下快速确认效果）。 */
+    private static final long DETAILED_LOG_WINDOW_MS = 30_000L;
+    private static final int MILESTONE_INTERVAL = 50;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -59,6 +65,7 @@ final class MqttResponderRunner implements ProbeRunner {
 
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
         Throwable failure = null;
+        long sessionStartMs = 0;
         Log.i(TAG, "responder start: env=" + config.mqttEnv + " clientId=" + config.mqttClientId
                 + " broker=" + config.host + ":" + config.port
                 + " sub=" + config.mqttSubscribeTopic + " pub=" + config.mqttPublishTopic);
@@ -85,6 +92,7 @@ final class MqttResponderRunner implements ProbeRunner {
 
             long lastPingNs = System.nanoTime();
             long lastMetricsNs = System.nanoTime();
+            sessionStartMs = System.currentTimeMillis();
             while (running.get()) {
                 MqttPacket packet = readPacket();
                 long nowNs = System.nanoTime();
@@ -94,9 +102,7 @@ final class MqttResponderRunner implements ProbeRunner {
                         int got = receivedCount.incrementAndGet();
                         sendPublish(config.mqttPublishTopic, payload);
                         int echoed = echoedCount.incrementAndGet();
-                        if (got % 50 == 0 || got <= 3) {
-                            callback.onEvent("已回显 " + echoed + " 条（最近 " + payload.length + " 字节）");
-                        }
+                        logEchoProgress(callback, got, echoed, payload.length, sessionStartMs);
                     }
                 }
                 if (nowNs - lastPingNs >= 20_000_000_000L) {
@@ -130,9 +136,51 @@ final class MqttResponderRunner implements ProbeRunner {
             } else {
                 callback.onFailed(failure, finalMetrics, Collections.emptyList());
             }
-            callback.onEvent("回显结束");
+            callback.onEvent(buildEndSummary(finalMetrics.received, sessionStartMs));
             executor.shutdown();
         }
+    }
+
+    private static void logEchoProgress(ProbeCallback callback, int got, int echoed,
+            int payloadBytes, long sessionStartMs) {
+        long elapsedMs = Math.max(1, System.currentTimeMillis() - sessionStartMs);
+        if (got == 1) {
+            callback.onEvent("收到首条消息（" + payloadBytes + " 字节），开始回显");
+            return;
+        }
+        boolean densePeriod = got <= DETAILED_LOG_MAX_COUNT || elapsedMs <= DETAILED_LOG_WINDOW_MS;
+        boolean milestone = got % MILESTONE_INTERVAL == 0;
+        if (!densePeriod && !milestone) {
+            return;
+        }
+        if (milestone) {
+            callback.onEvent(String.format(Locale.US,
+                    "已回显 %d 条 · 约 %.1f msg/s · 最近 %d 字节",
+                    echoed, got * 1000.0 / elapsedMs, payloadBytes));
+        } else {
+            callback.onEvent(String.format(Locale.US,
+                    "已回显第 %d 条（%d 字节）", got, payloadBytes));
+        }
+    }
+
+    private static String buildEndSummary(int echoed, long sessionStartMs) {
+        long runMs = sessionStartMs > 0 ? System.currentTimeMillis() - sessionStartMs : 0;
+        if (echoed <= 0) {
+            return "回显结束 · 未收到探测消息 · 运行 " + formatDuration(runMs);
+        }
+        return String.format(Locale.US,
+                "回显结束 · 共回显 %d 条 · 运行 %s · 均速约 %.1f msg/s",
+                echoed, formatDuration(runMs), echoed * 1000.0 / Math.max(1, runMs));
+    }
+
+    private static String formatDuration(long ms) {
+        long totalSec = Math.max(0, ms) / 1000;
+        long min = totalSec / 60;
+        long sec = totalSec % 60;
+        if (min > 0) {
+            return String.format(Locale.US, "%dm%02ds", min, sec);
+        }
+        return sec + "s";
     }
 
     /** 回显端用 ProbeMetrics 复用字段传递计数：sent=收到条数，received=回显条数。 */
