@@ -17,13 +17,23 @@
 
 ## 构建
 
+Gradle 分发包目录：`D:\jobs\gradle`（含 `gradle-9.3.0-bin.zip` 与解压后的 `gradle-9.3.0\`）。  
+Gradle 缓存与 daemon：`D:\jobs\gradle\user-home`（`gradlew` 与构建脚本会自动设置 `GRADLE_USER_HOME`）。
+
+当前工具链：**AGP 9.0.1** + **Gradle 9.3.0**（需 JDK 17）。
+
 在仓库根目录执行：
 
 ```powershell
 .\tools\build_android_probe.ps1
 ```
 
-脚本会优先使用本机已有的 Gradle 分发包，解压到 `.gradle-local` 后执行 `assembleDebug`。
+Android Studio 同步前请在 **Settings → Build Tools → Gradle** 中设置：
+
+- **Gradle user home**：`D:\jobs\gradle\user-home`
+- **Gradle**：选用 **Gradle Wrapper**（默认即可）
+
+脚本会优先使用 `D:\jobs\gradle` 下已有的 Gradle 分发包；缺失时自动下载 `gradle-9.3.0-bin.zip` 并解压。
 
 ## 运行
 
@@ -49,7 +59,9 @@ TCP Echo：
 python .\server\tcp_echo_sidecar\tcp_echo_server.py --host 0.0.0.0 --port 9002
 ```
 
-MQTT Echo：使用现有 `References\MqttTestPython\mqtt_recieve_both.py` 连接 Broker，订阅 App 的 `PubTopic`，原样发布到 App 的 `SubTopic`。
+MQTT：推荐「两台平板」模型，不依赖 Python 脚本。一台平板装 App 选 `回显端`，另一台选 `探测端`，两台连同一个 Broker 即可互测。详见下方「MQTT 两台平板模型」。
+
+（可选，旧方式）也可继续用 `References\MqttTestPython\mqtt_recieve_both.py` 当回显端：连接 Broker，订阅 App 的 `PubTopic`，原样发布到 App 的 `SubTopic`。
 
 2. 安装 APK：
 
@@ -70,7 +82,25 @@ adb install -r .\android-probe-app\app\build\outputs\apk\debug\app-debug.apk
 - `Port`：自动切到 `9002`
 - `Count/PPS/Bytes/Timeout`：默认 `500/20/200/1200` 可先不改
 
-### MQTT
+### MQTT 两台平板模型
+
+MQTT 场景是「设备 A 发消息经 Broker/中转服务器到设备 B，B 回发给 A」的往返链路。App 内置 `回显端` 角色，可直接用第二台平板替代 Python Echo 脚本：
+
+- 平板 A（探测端）：角色选 `探测端`，主动按 PPS 发包并统计 RTT、丢包、抖动。
+- 平板 B（回显端）：角色选 `回显端`，订阅本机 SN，收到 A 的 payload 后原样转发回 A 的 SN，自身不计算 RTT，只显示回显计数，持续运行到手动停止。
+
+两台平板连同一个 Broker，`本机SN(ClientId)`、`发布Topic`、`订阅Topic` 互为镜像即可：
+
+| 字段 | 平板 A（探测端） | 平板 B（回显端） |
+| --- | --- | --- |
+| 角色 | 探测端 | 回显端 |
+| 本机SN(ClientId) | SN_A | SN_B |
+| 发布Topic(对方SN) | SN_B | SN_A |
+| 订阅Topic(本机SN) | SN_A | SN_B |
+
+操作顺序：先在平板 B 启动回显端（看到「回显端已就绪」），再在平板 A 启动探测端开始测试。对比云聚通效果时，平板 A 分别在「未加速 / 云聚通加速」下各测一轮即可。
+
+### MQTT 字段说明
 
 公开仓库不内置真实测试环境账号。需要从本地 `config/probe.test.local.json` 或测试环境管理平台获取参数后填写：
 
@@ -85,18 +115,7 @@ adb install -r .\android-probe-app\app\build\outputs\apk\debug\app-debug.apk
 - `Username`：对应现有脚本 `username_pw_set(username, password)` 的 username；沿用脚本时通常是 `envs[env]` 的 gateway api 地址
 - `Password/token(可空自动)`：留空时 App 自动用 `send_sn + sn_pwd + mac` 获取 token；手动填写时直接使用该 token
 
-Echo 端示例：
-
-```powershell
-.\server\mqtt_echo_sidecar\run_testcn_echo.ps1 `
-  -BrokerIp <broker_ip> `
-  -Port 1883 `
-  -Env testcn `
-  -SendSn <send_sn> `
-  -ReceiveSn <receive_sn> `
-  -ReceivePwd <receive_sn_pwd> `
-  -ReceiveMac <receive_mac>
-```
+Echo 端（回显端）：用第二台平板装本 App，角色选「回显端」，把 `发布Topic / 订阅Topic` 与探测端对调即可（见上方「MQTT 两台平板模型」），不再需要 Python 脚本。
 
 App 会把最后一次填写的参数保存到设备本地私有目录，后续打开自动恢复。真实生产账号、token 不建议写入仓库或 APK。
 

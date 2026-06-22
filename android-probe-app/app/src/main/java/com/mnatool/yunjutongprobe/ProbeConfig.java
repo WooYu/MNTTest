@@ -13,6 +13,18 @@ final class ProbeConfig {
         }
     }
 
+    // MQTT 两台平板模型：探测端主动发包测 RTT，回显端订阅本机 SN 并把收到的 payload 原样转发回对端 SN。
+    enum Role {
+        PROBE("探测端"),
+        RESPONDER("回显端");
+
+        final String label;
+
+        Role(String label) {
+            this.label = label;
+        }
+    }
+
     final Protocol protocol;
     final String host;
     final int port;
@@ -31,7 +43,9 @@ final class ProbeConfig {
     final String mqttEnv;
     final String mqttDevicePwd;
     final String mqttDeviceMac;
+    final Role mqttRole;
 
+    // 兼容旧调用：默认探测端角色。
     ProbeConfig(
             Protocol protocol,
             String host,
@@ -52,6 +66,32 @@ final class ProbeConfig {
             String mqttDevicePwd,
             String mqttDeviceMac
     ) {
+        this(protocol, host, port, count, pps, packetBytes, timeoutMs, modeTag, runId,
+                vpnActiveAtStart, mqttClientId, mqttPublishTopic, mqttSubscribeTopic,
+                mqttUsername, mqttPassword, mqttEnv, mqttDevicePwd, mqttDeviceMac, Role.PROBE);
+    }
+
+    ProbeConfig(
+            Protocol protocol,
+            String host,
+            int port,
+            int count,
+            int pps,
+            int packetBytes,
+            int timeoutMs,
+            String modeTag,
+            String runId,
+            boolean vpnActiveAtStart,
+            String mqttClientId,
+            String mqttPublishTopic,
+            String mqttSubscribeTopic,
+            String mqttUsername,
+            String mqttPassword,
+            String mqttEnv,
+            String mqttDevicePwd,
+            String mqttDeviceMac,
+            Role mqttRole
+    ) {
         this.protocol = protocol;
         this.host = host;
         this.port = port;
@@ -70,5 +110,6 @@ final class ProbeConfig {
         this.mqttEnv = mqttEnv;
         this.mqttDevicePwd = mqttDevicePwd;
         this.mqttDeviceMac = mqttDeviceMac;
+        this.mqttRole = mqttRole;
     }
 }

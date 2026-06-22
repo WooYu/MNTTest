@@ -4,10 +4,10 @@
 
 ## 目录
 
-- `android-probe-app/`：Android 横屏 Probe App 源码，支持 UDP / TCP Echo / MQTT。
+- `android-probe-app/`：Android 横屏 Probe App 源码，支持 UDP / TCP Echo / MQTT。MQTT 内置「探测端 / 回显端」两种角色，可两台平板互测，无需 Python 脚本。
 - `server/udp_echo_sidecar/`：UDP Echo 服务端和本地 probe client。
 - `server/tcp_echo_sidecar/`：TCP Echo 服务端和本地 probe client。
-- `server/mqtt_echo_sidecar/`：复用现有 MQTT Broker 的 Echo 启动脚本。
+- MQTT 不再单独提供 Echo 脚本：回显端由第二台平板的 App「回显端」角色担任。`References/MqttTestPython/` 仅保留历史鉴权/延迟参考脚本。
 - `References/MqttTestPython/`：历史 MQTT 鉴权和延迟测试参考脚本。
 - `tools/`：本地构建脚本。
 

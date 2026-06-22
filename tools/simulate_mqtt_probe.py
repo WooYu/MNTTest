@@ -242,7 +242,7 @@ class MockBroker:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Echo 客户端（对应 server/mqtt_echo_sidecar 的 Python 逻辑）
+# Echo 客户端（对应 App 回显端 MqttResponderRunner 的订阅/回发逻辑）
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_echo_client(broker_host, broker_port, sub_topic, pub_topic, stop_event):

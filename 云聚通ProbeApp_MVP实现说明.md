@@ -7,7 +7,7 @@ MVP 已落地为三个独立部分：
 - Android Probe App：`android-probe-app/`
 - UDP Echo Sidecar：`server/udp_echo_sidecar/`
 - TCP Echo Sidecar：`server/tcp_echo_sidecar/`
-- MQTT Echo 对接说明：`server/mqtt_echo_sidecar/`
+- MQTT：两台平板模型，App 内置「探测端 / 回显端」角色，回显端由第二台平板担任，无需独立脚本
 
 当前 App 支持 UDP Probe、TCP Echo Probe、MQTT Probe 三种协议。UDP 用于验证真实丢包、抖动和尾延迟；TCP/MQTT 用于验证业务协议层 RTT、应用层超时、重复、乱序和连接稳定性。结论仍需分开解释：TCP/MQTT 会被重传机制影响，不能替代 UDP 的真实丢包判断。
 
@@ -109,7 +109,7 @@ Echo Server 建议部署在现有业务中转服务器旁边，而不是改造�
 - 部署 `udp_echo_server.py`
 - 部署 `tcp_echo_server.py`
 - 放通安全组和系统防火墙 UDP `9001`、TCP `9002`
-- MQTT 继续连接现有 Broker，Echo 端使用 `References\MqttTestPython\mqtt_recieve_both.py` 的订阅/回发模式
+- MQTT 继续连接现有 Broker，回显端由第二台平板的 App「回显端」角色担任（订阅本机 SN，收到后原样转发回对端 SN），无需 Python 脚本
 
 这样可以保持业务链路无侵入，同时验证云聚通是否能代理并加速其他 App 的 UDP、TCP、MQTT 流量。
 
