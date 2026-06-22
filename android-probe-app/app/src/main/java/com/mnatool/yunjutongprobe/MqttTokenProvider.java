@@ -2,6 +2,8 @@ package com.mnatool.yunjutongprobe;
 
 import android.util.Base64;
 
+import android.util.Log;
+
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -20,6 +22,7 @@ import java.util.Locale;
 import javax.crypto.Cipher;
 
 final class MqttTokenProvider {
+    private static final String TAG = "ProbeApp";
     private static final int MAX_ENCRYPT_SIZE = 86;
     private static final String SALT = "3c28b87f8a4b342843847bfeb9e3f3f6";
     private static final String DEFAULT_PUBLIC_KEY =
@@ -36,7 +39,9 @@ final class MqttTokenProvider {
 
     static String getToken(String env, String sn, String pwd, String mac) throws Exception {
         String domain = baseDomain(env);
+        Log.i(TAG, "getToken: env=" + env + " domain=" + domain + " sn=" + sn);
         String validKey = getValidKey(domain);
+        Log.d(TAG, "getToken: validKey obtained");
         String signSource = "type=1&sn=" + sn
                 + "&pwd=" + pwd
                 + "&mac1=&mac2=" + mac
@@ -65,18 +70,24 @@ final class MqttTokenProvider {
             output.write(request.toString().getBytes(StandardCharsets.UTF_8));
         }
         JSONObject response = new JSONObject(readAll(connection));
-        if (response.optInt("code") != 200) {
+        int code = response.optInt("code");
+        Log.i(TAG, "getToken: response code=" + code);
+        if (code != 200) {
+            Log.e(TAG, "getToken failed: " + response.optString("message"));
             throw new IllegalStateException(response.optString("message", "device-login failed"));
         }
+        Log.i(TAG, "getToken: success");
         return response.getJSONObject("data").getString("token");
     }
 
     private static String getValidKey(String domain) throws Exception {
+        Log.d(TAG, "getValidKey: " + domain);
         HttpURLConnection connection = (HttpURLConnection) new URL(domain + "/api/device/product/auth/valid-key").openConnection();
         connection.setConnectTimeout(8000);
         connection.setReadTimeout(8000);
         connection.setRequestMethod("GET");
         JSONObject response = new JSONObject(readAll(connection));
+        Log.d(TAG, "getValidKey: ok");
         return response.getString("data");
     }
 

@@ -18,6 +18,10 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -26,4 +30,5 @@ tasks.withType(JavaCompile).configureEach {
 
 dependencies {
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20231013"
 }

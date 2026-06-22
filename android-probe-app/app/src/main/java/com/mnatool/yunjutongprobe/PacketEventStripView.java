@@ -17,6 +17,7 @@ public final class PacketEventStripView extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private List<ProbeSample> samples = new ArrayList<>();
     private ProbeMetrics metrics = ProbeMetrics.empty();
+    private long timeoutNs = 1_500_000_000L;
 
     public PacketEventStripView(Context context) {
         super(context);
@@ -26,10 +27,11 @@ public final class PacketEventStripView extends View {
         super(context, attrs);
     }
 
-    void update(List<ProbeSample> samples, ProbeMetrics metrics) {
+    void update(List<ProbeSample> samples, ProbeMetrics metrics, long timeoutMs) {
         this.samples = new ArrayList<>(samples);
         Collections.sort(this.samples, Comparator.comparingInt(sample -> sample.seq));
         this.metrics = metrics;
+        this.timeoutNs = timeoutMs * 1_000_000L;
         invalidate();
     }
 
@@ -53,7 +55,7 @@ public final class PacketEventStripView extends View {
             if (sampleIndex < samples.size()) {
                 ProbeSample sample = samples.get(sampleIndex);
                 if (!sample.received()) {
-                    boolean expired = metrics.finalResult || System.nanoTime() - sample.clientSendNs > 1_000_000_000L;
+                    boolean expired = metrics.finalResult || System.nanoTime() - sample.clientSendNs > timeoutNs;
                     color = expired ? Color.rgb(221, 43, 58) : Color.rgb(229, 234, 242);
                 } else if (sample.rttMs() >= Math.max(metrics.p95RttMs, 1.0)) {
                     color = Color.rgb(244, 171, 49);

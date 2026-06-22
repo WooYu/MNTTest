@@ -45,6 +45,7 @@ final class TcpProbeRunner implements ProbeRunner {
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
         long timeoutNs = config.timeoutMs * 1_000_000L;
         Thread receiver = null;
+        Throwable failure = null;
         try {
             socket = new Socket();
             socket.setTcpNoDelay(true);
@@ -99,7 +100,10 @@ final class TcpProbeRunner implements ProbeRunner {
                 sleepNs(100_000_000L);
             }
         } catch (Exception exc) {
-            callback.onEvent("TCP 测试异常: " + exc.getMessage());
+            if (running.get()) {
+                failure = exc;
+                callback.onEvent("TCP 失败: [" + exc.getClass().getSimpleName() + "] " + exc.getMessage());
+            }
         } finally {
             running.set(false);
             closeSocket();
@@ -111,8 +115,13 @@ final class TcpProbeRunner implements ProbeRunner {
                 }
             }
             ProbeMetrics finalMetrics = snapshot(timeoutNs, true);
-            callback.onMetrics(finalMetrics, snapshotSamples());
-            callback.onFinished(finalMetrics, snapshotSamples());
+            List<ProbeSample> finalSamples = snapshotSamples();
+            callback.onMetrics(finalMetrics, finalSamples);
+            if (failure == null) {
+                callback.onFinished(finalMetrics, finalSamples);
+            } else {
+                callback.onFailed(failure, finalMetrics, finalSamples);
+            }
             callback.onEvent("测试结束");
             executor.shutdown();
         }

@@ -2,6 +2,8 @@ package com.mnatool.yunjutongprobe;
 
 import org.json.JSONObject;
 
+import android.util.Log;
+
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -18,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class MqttProbeRunner implements ProbeRunner {
+    private static final String TAG = "ProbeApp";
     private static final int MQTT_CONNECT = 1;
     private static final int MQTT_CONNACK = 2;
     private static final int MQTT_PUBLISH = 3;
@@ -56,22 +59,30 @@ final class MqttProbeRunner implements ProbeRunner {
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
         long timeoutNs = config.timeoutMs * 1_000_000L;
         Thread receiver = null;
+        Throwable failure = null;
+        Log.i(TAG, "runInternal start: env=" + config.mqttEnv + " clientId=" + config.mqttClientId
+                + " broker=" + config.host + ":" + config.port + " count=" + config.count + " pps=" + config.pps);
         try {
-            openSocket(config);
-            callback.onEvent("MQTT TCP 已连接，等待 CONNACK");
             String username = config.mqttUsername.isEmpty()
                     ? MqttTokenProvider.usernameForEnv(config.mqttEnv)
                     : config.mqttUsername;
             String password = config.mqttPassword;
             if (password.isEmpty()) {
+                Log.i(TAG, "password empty, fetching token for sn=" + config.mqttClientId);
                 callback.onEvent("正在获取 MQTT token...");
                 password = MqttTokenProvider.getToken(config.mqttEnv, config.mqttClientId, config.mqttDevicePwd, config.mqttDeviceMac);
+                Log.i(TAG, "token ok, length=" + password.length() + " username=" + username);
+                callback.onEvent("token 已就绪，正在连接 Broker...");
+            } else {
+                Log.i(TAG, "using provided token, length=" + password.length() + " username=" + username);
             }
-            callback.onEvent("MQTT token 已就绪，等待 CONNACK");
+            openSocket(config);
+            callback.onEvent("MQTT TCP 已连接，等待 CONNACK");
             sendConnect(config, username, password);
             waitForConnack(config.timeoutMs);
             sendSubscribe(config.mqttSubscribeTopic);
             waitForSuback(config.timeoutMs);
+            Log.i(TAG, "subscribed: " + config.mqttSubscribeTopic);
             callback.onEvent("MQTT 已订阅 " + config.mqttSubscribeTopic);
 
             receiver = new Thread(() -> receiveLoop(config, callback), "mqtt-probe-receiver");
@@ -81,6 +92,7 @@ final class MqttProbeRunner implements ProbeRunner {
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             long lastPingNs = System.nanoTime();
+            Log.i(TAG, "probe loop: count=" + config.count + " pps=" + config.pps + " topic=" + config.mqttPublishTopic);
             for (int seq = 0; seq < config.count && running.get(); seq++) {
                 long nowNs = System.nanoTime();
                 if (nowNs < nextNs) {
@@ -101,6 +113,10 @@ final class MqttProbeRunner implements ProbeRunner {
                 );
                 samples.put(seq, sample);
                 sendPublish(config.mqttPublishTopic, payload);
+                if (seq % 50 == 0) {
+                    Log.d(TAG, "publish seq=" + seq + "/" + config.count
+                            + " highestRecv=" + highestReceivedSeq.get());
+                }
                 nextNs += intervalNs;
 
                 long metricsNow = System.nanoTime();
@@ -123,7 +139,11 @@ final class MqttProbeRunner implements ProbeRunner {
                 sleepNs(100_000_000L);
             }
         } catch (Exception exc) {
-            callback.onEvent("MQTT 测试异常: " + exc.getMessage());
+            if (running.get()) {
+                failure = exc;
+                Log.e(TAG, "runInternal exception: " + exc.getClass().getSimpleName() + " " + exc.getMessage(), exc);
+                callback.onEvent("MQTT 失败: [" + exc.getClass().getSimpleName() + "] " + exc.getMessage());
+            }
         } finally {
             running.set(false);
             try {
@@ -139,20 +159,31 @@ final class MqttProbeRunner implements ProbeRunner {
                 }
             }
             ProbeMetrics finalMetrics = snapshot(timeoutNs, true);
-            callback.onMetrics(finalMetrics, snapshotSamples());
-            callback.onFinished(finalMetrics, snapshotSamples());
+            Log.i(TAG, "done: sent=" + finalMetrics.sent + " recv=" + finalMetrics.received
+                    + " loss=" + String.format(java.util.Locale.US, "%.1f%%", finalMetrics.lossRate * 100)
+                    + " avgRtt=" + String.format(java.util.Locale.US, "%.1fms", finalMetrics.avgRttMs)
+                    + " p95=" + String.format(java.util.Locale.US, "%.1fms", finalMetrics.p95RttMs));
+            List<ProbeSample> finalSamples = snapshotSamples();
+            callback.onMetrics(finalMetrics, finalSamples);
+            if (failure == null) {
+                callback.onFinished(finalMetrics, finalSamples);
+            } else {
+                callback.onFailed(failure, finalMetrics, finalSamples);
+            }
             callback.onEvent("测试结束");
             executor.shutdown();
         }
     }
 
     private void openSocket(ProbeConfig config) throws Exception {
+        Log.i(TAG, "openSocket: connecting to " + config.host + ":" + config.port + " timeout=" + config.timeoutMs + "ms");
         socket = new Socket();
         socket.setTcpNoDelay(true);
         socket.connect(new InetSocketAddress(config.host, config.port), config.timeoutMs);
         socket.setSoTimeout(100);
         input = socket.getInputStream();
         output = socket.getOutputStream();
+        Log.i(TAG, "openSocket: connected, localPort=" + socket.getLocalPort());
     }
 
     private void sendConnect(ProbeConfig config, String username, String password) throws Exception {
@@ -197,8 +228,15 @@ final class MqttProbeRunner implements ProbeRunner {
                 continue;
             }
             if (packet.type == MQTT_CONNACK) {
+                int code = packet.body.length < 2 ? -1 : (packet.body[1] & 0xff);
+                Log.i(TAG, "CONNACK received code=" + code);
                 if (packet.body.length < 2 || packet.body[1] != 0) {
-                    throw new IllegalStateException("CONNACK code=" + (packet.body.length < 2 ? -1 : packet.body[1]));
+                    String detail = "CONNACK 拒绝 code=" + code
+                            + (code == 4 ? "(用户名/密码错误)" : code == 5 ? "(未授权)" : "");
+                    if (code == 4 || code == 5) {
+                        throw new SecurityException(detail);
+                    }
+                    throw new IllegalStateException(detail);
                 }
                 return;
             }
@@ -294,6 +332,8 @@ final class MqttProbeRunner implements ProbeRunner {
         sample.clientRecvNs = System.nanoTime();
         sample.serverRecvNs = ack.optLong("serverRecvNs", 0);
         sample.serverSendNs = ack.optLong("serverSendNs", 0);
+        double rttMs = (sample.clientRecvNs - sample.clientSendNs) / 1_000_000.0;
+        Log.d(TAG, "echo seq=" + seq + " rtt=" + String.format(java.util.Locale.US, "%.1f", rttMs) + "ms");
         int previousHigh = highestReceivedSeq.getAndUpdate(old -> Math.max(old, seq));
         sample.reordered = previousHigh > seq;
     }

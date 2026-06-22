@@ -45,6 +45,7 @@ final class UdpProbeRunner implements ProbeRunner {
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
         long timeoutNs = config.timeoutMs * 1_000_000L;
         Thread receiver = null;
+        Throwable failure = null;
         try {
             socket = new DatagramSocket();
             socket.setSoTimeout(100);
@@ -94,7 +95,10 @@ final class UdpProbeRunner implements ProbeRunner {
                 sleepNs(100_000_000L);
             }
         } catch (Exception exc) {
-            callback.onEvent("测试异常: " + exc.getMessage());
+            if (running.get()) {
+                failure = exc;
+                callback.onEvent("UDP 失败: [" + exc.getClass().getSimpleName() + "] " + exc.getMessage());
+            }
         } finally {
             running.set(false);
             DatagramSocket current = socket;
@@ -109,8 +113,13 @@ final class UdpProbeRunner implements ProbeRunner {
                 }
             }
             ProbeMetrics finalMetrics = snapshot(timeoutNs, true);
-            callback.onMetrics(finalMetrics, snapshotSamples());
-            callback.onFinished(finalMetrics, snapshotSamples());
+            List<ProbeSample> finalSamples = snapshotSamples();
+            callback.onMetrics(finalMetrics, finalSamples);
+            if (failure == null) {
+                callback.onFinished(finalMetrics, finalSamples);
+            } else {
+                callback.onFailed(failure, finalMetrics, finalSamples);
+            }
             callback.onEvent("测试结束");
             executor.shutdown();
         }

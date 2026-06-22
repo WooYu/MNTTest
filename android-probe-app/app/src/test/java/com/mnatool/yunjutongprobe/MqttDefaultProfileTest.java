@@ -10,7 +10,7 @@ public class MqttDefaultProfileTest {
     @Test
     public void containsApprovedChinaTestSenderDefaults() {
         assertEquals(2, MqttDefaultProfile.PROTOCOL_INDEX);
-        assertEquals("192.168.8.135", MqttDefaultProfile.HOST);
+        assertEquals("113.133.169.192", MqttDefaultProfile.HOST);
         assertEquals("1883", MqttDefaultProfile.PORT);
         assertEquals("test", MqttDefaultProfile.ENV);
         assertEquals("V37G00000108", MqttDefaultProfile.CLIENT_ID);

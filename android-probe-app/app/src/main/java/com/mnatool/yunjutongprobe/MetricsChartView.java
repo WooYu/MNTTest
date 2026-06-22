@@ -21,6 +21,7 @@ public final class MetricsChartView extends View {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private List<ProbeSample> samples = new ArrayList<>();
     private ProbeMetrics metrics = ProbeMetrics.empty();
+    private long timeoutNs = 1_500_000_000L; // 默认 1.5s，由 update() 传入
 
     public MetricsChartView(Context context) {
         super(context);
@@ -32,10 +33,11 @@ public final class MetricsChartView extends View {
         init();
     }
 
-    void update(List<ProbeSample> samples, ProbeMetrics metrics) {
+    void update(List<ProbeSample> samples, ProbeMetrics metrics, long timeoutMs) {
         this.samples = new ArrayList<>(samples);
         Collections.sort(this.samples, Comparator.comparingInt(sample -> sample.seq));
         this.metrics = metrics;
+        this.timeoutNs = timeoutMs * 1_000_000L;
         invalidate();
     }
 
@@ -105,7 +107,7 @@ public final class MetricsChartView extends View {
                 } else {
                     avgPath.lineTo(x, avgY);
                 }
-            } else if (metrics.finalResult || nowNs - sample.clientSendNs > 1_000_000_000L) {
+            } else if (metrics.finalResult || nowNs - sample.clientSendNs > timeoutNs) {
                 canvas.drawLine(x, bottom, x, top, lossPaint);
             }
         }
