@@ -35,6 +35,8 @@ final class ProbeStorage {
     static final String INDEX_FILE = "index.json";
     static final String CSV_NAME = "samples.csv";
     static final String SUMMARY_NAME = "summary.json";
+    /** Excel（尤其中文 Windows）双击打开 CSV 时需 BOM 才能识别 UTF-8。 */
+    private static final String UTF8_BOM = "\uFEFF";
 
     private ProbeStorage() {
     }
@@ -492,7 +494,7 @@ final class ProbeStorage {
             builder.append(sample.vpnActiveAtSend).append(',');
             builder.append(csv(sample.error == null ? "" : sample.error)).append('\n');
         }
-        return builder.toString();
+        return UTF8_BOM + builder;
     }
 
     private static String buildSummaryContent(ProbeConfig config, ProbeMetrics metrics) throws Exception {

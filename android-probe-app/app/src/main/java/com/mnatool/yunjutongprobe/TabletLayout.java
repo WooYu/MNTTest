@@ -31,7 +31,7 @@ final class TabletLayout {
 
     /** 配置卡片之间的垂直间距 */
     static int sectionGapDp(boolean wide) {
-        return wide ? 20 : 14;
+        return wide ? 24 : 16;
     }
 
     /** 参数页双栏之间的水平间距 */

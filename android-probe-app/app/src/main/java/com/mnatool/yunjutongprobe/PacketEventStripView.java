@@ -24,6 +24,7 @@ public final class PacketEventStripView extends ScopeChartView {
     private List<ProbeSample> samples = new ArrayList<>();
     private ProbeMetrics metrics = ProbeMetrics.empty();
     private long timeoutNs = 1_500_000_000L;
+    private boolean stoppedEarly;
 
     public PacketEventStripView(Context context) {
         super(context);
@@ -42,9 +43,10 @@ public final class PacketEventStripView extends ScopeChartView {
         textPaint.setTextSize(dp(11));
     }
 
-    void update(List<ProbeSample> samples, ProbeMetrics metrics, long timeoutMs) {
+    void update(List<ProbeSample> samples, ProbeMetrics metrics, long timeoutMs, boolean stoppedEarly) {
         this.metrics = metrics;
         this.timeoutNs = timeoutMs * 1_000_000L;
+        this.stoppedEarly = stoppedEarly;
         this.samples = new ArrayList<>(samples);
         sortIfNeeded(this.samples);
         invalidate();
@@ -85,10 +87,13 @@ public final class PacketEventStripView extends ScopeChartView {
             int color;
             if (!sample.received()) {
                 boolean expired = metrics.finalResult || nowNs - sample.clientSendNs > timeoutNs;
-                if (!expired) {
+                if (stoppedEarly && !expired) {
+                    color = Palette.CHART_PENDING;
+                } else if (!expired) {
                     continue; // 尚未超时的在途包不画，保留灰色轨道
+                } else {
+                    color = Palette.DANGER;
                 }
-                color = Palette.DANGER;
             } else if (sample.rttMs() >= p95) {
                 color = Palette.WARNING;
             } else {

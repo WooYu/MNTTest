@@ -33,12 +33,15 @@ public final class MetricsChartView extends ScopeChartView {
     private final Paint p50Paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint p99Paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint lossPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pendingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint stopLinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path linePath = new Path();
     private final RectF barRect = new RectF();
     private List<ProbeSample> samples = new ArrayList<>();
     private ProbeMetrics metrics = ProbeMetrics.empty();
     private long timeoutNs = 1_500_000_000L;
+    private boolean stoppedEarly;
 
     public MetricsChartView(Context context) {
         super(context);
@@ -50,9 +53,10 @@ public final class MetricsChartView extends ScopeChartView {
         init();
     }
 
-    void update(List<ProbeSample> samples, ProbeMetrics metrics, long timeoutMs) {
+    void update(List<ProbeSample> samples, ProbeMetrics metrics, long timeoutMs, boolean stoppedEarly) {
         this.metrics = metrics;
         this.timeoutNs = timeoutMs * 1_000_000L;
+        this.stoppedEarly = stoppedEarly;
         this.samples = new ArrayList<>(samples);
         sortIfNeeded(this.samples);
         invalidate();
@@ -83,6 +87,11 @@ public final class MetricsChartView extends ScopeChartView {
         p99Paint.setStyle(Paint.Style.STROKE);
         p99Paint.setPathEffect(new DashPathEffect(dash, 0));
         lossPaint.setColor(LOSS_COLOR);
+        pendingPaint.setColor(Palette.CHART_PENDING);
+        stopLinePaint.setColor(Palette.WARNING);
+        stopLinePaint.setStrokeWidth(dp(1));
+        stopLinePaint.setStyle(Paint.Style.STROKE);
+        stopLinePaint.setPathEffect(new DashPathEffect(new float[]{dp(3), dp(3)}, 0));
         textPaint.setColor(Palette.CHART_AXIS_TEXT);
         textPaint.setTextSize(dp(11));
     }
@@ -124,8 +133,8 @@ public final class MetricsChartView extends ScopeChartView {
 
         float cullLeft = -spacing;
         float cullRight = width + spacing;
-        // 丢包竖条（与丢包事件条同宽、同色、同形状）
         long nowNs = System.nanoTime();
+        // 丢包竖条（与丢包事件条同宽、同色、同形状）
         for (ProbeSample sample : samples) {
             if (sample.received()) {
                 continue;
@@ -134,9 +143,30 @@ public final class MetricsChartView extends ScopeChartView {
             if (cx + half < cullLeft || cx - half > cullRight) {
                 continue;
             }
-            if (metrics.finalResult || nowNs - sample.clientSendNs > timeoutNs) {
-                barRect.set(cx - half, top, cx + half, bottom);
-                canvas.drawRoundRect(barRect, dp(2), dp(2), lossPaint);
+            boolean expired = metrics.finalResult || nowNs - sample.clientSendNs > timeoutNs;
+            Paint paint;
+            if (stoppedEarly && !expired) {
+                paint = pendingPaint;
+            } else if (expired || metrics.finalResult) {
+                paint = lossPaint;
+            } else {
+                continue;
+            }
+            barRect.set(cx - half, top, cx + half, bottom);
+            canvas.drawRoundRect(barRect, dp(2), dp(2), paint);
+        }
+
+        // 中途停止：在最后一个已发包序号处画停止线
+        if (stoppedEarly && !samples.isEmpty()) {
+            int maxSeq = 0;
+            for (ProbeSample sample : samples) {
+                if (sample.seq > maxSeq) {
+                    maxSeq = sample.seq;
+                }
+            }
+            float stopX = originX + maxSeq * spacing;
+            if (stopX >= cullLeft && stopX <= cullRight) {
+                canvas.drawLine(stopX, top, stopX, bottom, stopLinePaint);
             }
         }
 

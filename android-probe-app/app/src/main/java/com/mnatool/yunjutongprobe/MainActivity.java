@@ -122,10 +122,18 @@ public final class MainActivity extends Activity {
     private Button modeBaselineButton;
     private Button modeAccelButton;
     private Switch weakNetSceneSwitch;
+    private boolean suppressModeSpinnerCallback;
+    private Drawable modeToggleSelectedBg;
+    private Drawable modeToggleUnselectedBg;
+    private final Runnable weakNetSectionRefreshTask = this::refreshWeakNetSectionExpanded;
     private LinearLayout weakNetCollapsibleBody;
     private LinearLayout mqttAdvancedBody;
     private Palette.SectionTheme activeFieldTheme;
-    private TextView compareView;
+    private LinearLayout compareView;
+    private TextView compareVerdictView;
+    private TextView comparePrevView;
+    private TextView compareCurrView;
+    private TextView compareDeltaView;
     private ProbeMetrics prevMetrics;
     private ProbeConfig prevConfig;
     private long lastChartUpdateMs;
@@ -162,6 +170,15 @@ public final class MainActivity extends Activity {
     private boolean stopRequested;
     private TextView resultSummaryView;
     private TextView resultStatusView;
+    private TextView resultMetaView;
+    private TextView resultLossValue;
+    private TextView resultAvgValue;
+    private TextView resultP95Value;
+    private TextView resultP99Value;
+    private TextView resultSentValue;
+    private TextView resultRecvValue;
+    private TextView resultBurstValue;
+    private TextView resultJitterValue;
     private Button retestButton;
     private int mqttTokenFetchGeneration;
     private final Handler mqttTokenHandler = new Handler(Looper.getMainLooper());
@@ -667,12 +684,14 @@ public final class MainActivity extends Activity {
     private LinearLayout configColumn(View... sections) {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
+        int gap = dp(TabletLayout.sectionGapDp(wideLayout));
         for (int i = 0; i < sections.length; i++) {
-            if (i == 0) {
-                stripTopMargin(sections[i]);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            if (i > 0) {
+                params.topMargin = gap;
             }
-            column.addView(sections[i], new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            column.addView(sections[i], params);
         }
         return column;
     }
@@ -694,23 +713,35 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         page.setBackgroundColor(BG);
 
-        LinearLayout topBar = new LinearLayout(this);
-        topBar.setOrientation(LinearLayout.HORIZONTAL);
-        topBar.setGravity(Gravity.CENTER_VERTICAL);
-        topBar.setPadding(
+        LinearLayout headerWrap = new LinearLayout(this);
+        headerWrap.setOrientation(LinearLayout.VERTICAL);
+        headerWrap.setPadding(
                 dp(TabletLayout.pagePaddingH(wideLayout)),
                 dp(TabletLayout.pagePaddingV(wideLayout)),
                 dp(TabletLayout.pagePaddingH(wideLayout)),
-                dp(8));
-        Button backButton = button("← 返回", Palette.SURFACE_SUBTLE, INK);
+                dp(TabletLayout.headerBottomGapDp(wideLayout)));
+
+        LinearLayout navRow = new LinearLayout(this);
+        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        navRow.setGravity(Gravity.CENTER_VERTICAL);
+        Button backButton = button("←", Palette.SURFACE_SUBTLE, INK);
+        backButton.setMinWidth(dp(44));
+        backButton.setPadding(dp(12), 0, dp(12), 0);
         backButton.setOnClickListener(v -> closeHistory());
-        topBar.addView(backButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, buttonHeight()));
-        TextView title = text("历史记录", wideLayout ? 22 : 20, INK, Typeface.BOLD);
-        title.setPadding(dp(12), 0, 0, 0);
-        topBar.addView(title, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        page.addView(topBar, matchWrap());
+        navRow.addView(backButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)));
+        navRow.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        headerWrap.addView(navRow, matchWrap());
+
+        TextView title = text("历史记录", wideLayout ? 24 : 22, BLUE, Typeface.BOLD);
+        title.setPadding(dp(2), dp(6), dp(2), 0);
+        headerWrap.addView(title);
+        TextView subtitle = smallText(
+                "记录保存在 " + ProbeRunRecord.DOWNLOADS_FOLDER + " · 点击条目查看详情",
+                MUTED, Typeface.NORMAL);
+        subtitle.setPadding(dp(2), dp(4), dp(2), 0);
+        headerWrap.addView(subtitle);
+        page.addView(headerWrap, matchWrap());
 
         ScrollView sv = new ScrollView(this);
         sv.setFillViewport(true);
@@ -723,11 +754,6 @@ public final class MainActivity extends Activity {
                 dp(TabletLayout.pagePaddingBottom(wideLayout)));
         sv.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-
-        TextView hint = smallText("记录保存在 " + ProbeRunRecord.DOWNLOADS_FOLDER
-                + "，点击条目查看详情", MUTED, Typeface.NORMAL);
-        hint.setPadding(dp(2), 0, dp(2), dp(12));
-        root.addView(hint);
 
         historyListContainer = new LinearLayout(this);
         historyListContainer.setOrientation(LinearLayout.VERTICAL);
@@ -859,8 +885,8 @@ public final class MainActivity extends Activity {
             ProbeMetrics metrics = MetricsCalculator.calculate(
                     samples, Long.MAX_VALUE, timeoutMs * 1_000_000L, true);
             historyScopeViewport.setTotalPoints(computeTotalPoints(samples));
-            historyChartView.update(samples, metrics, timeoutMs);
-            historyPacketStripView.update(samples, metrics, timeoutMs);
+            historyChartView.update(samples, metrics, timeoutMs, false);
+            historyPacketStripView.update(samples, metrics, timeoutMs, false);
             historyChartCard.setVisibility(View.VISIBLE);
             historyLossCard.setVisibility(View.VISIBLE);
         } catch (Exception exc) {
@@ -1157,26 +1183,37 @@ public final class MainActivity extends Activity {
     }
 
     private View buildResultPage() {
-        ScrollView sv = new ScrollView(this);
-        sv.setFillViewport(true);
-        sv.setBackgroundColor(BG);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(
+        exportButton = button("再次导出", Palette.NEUTRAL_DARK, Color.WHITE);
+        exportButton.setOnClickListener(v -> exportLastRun(true));
+        retestButton = button("再次测试", Palette.SURFACE_SUBTLE, INK);
+        retestButton.setOnClickListener(v -> resetForRetest());
+        View footer = resultActionFooter(exportButton, retestButton);
+
+        LinearLayout scrollRoot = new LinearLayout(this);
+        scrollRoot.setOrientation(LinearLayout.VERTICAL);
+        scrollRoot.setPadding(
                 dp(TabletLayout.pagePaddingH(wideLayout)),
                 dp(TabletLayout.pagePaddingV(wideLayout)),
                 dp(TabletLayout.pagePaddingH(wideLayout)),
                 dp(TabletLayout.pagePaddingBottom(wideLayout)));
-        sv.addView(root, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
 
-        TextView title = text("测试结果", wideLayout ? 22 : 20, INK, Typeface.BOLD);
-        title.setPadding(dp(2), 0, dp(2), dp(10));
-        root.addView(title);
+        TextView title = text("测试结果", wideLayout ? 24 : 22, BLUE, Typeface.BOLD);
+        title.setPadding(dp(2), 0, dp(2), dp(TabletLayout.headerBottomGapDp(wideLayout)));
+        scrollRoot.addView(title);
 
         resultStatusView = text("暂无测试结果", 15, MUTED, Typeface.BOLD);
-        resultStatusView.setPadding(dp(14), dp(12), dp(14), dp(12));
+        resultStatusView.setPadding(dp(16), dp(14), dp(16), dp(14));
         resultStatusView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+        scrollRoot.addView(resultStatusView, matchWrap());
+
+        resultMetaView = smallText("—", MUTED, Typeface.NORMAL);
+        LinearLayout.LayoutParams metaParams = matchWrap();
+        metaParams.topMargin = dp(12);
+        resultMetaView.setLayoutParams(metaParams);
+        scrollRoot.addView(resultMetaView);
+
+        scrollRoot.addView(resultPrimaryMetricGrid());
+        scrollRoot.addView(resultSecondaryMetricGrid());
 
         resultSummaryView = new TextView(this);
         resultSummaryView.setTextSize(13);
@@ -1184,82 +1221,140 @@ public final class MainActivity extends Activity {
         resultSummaryView.setPadding(dp(14), dp(14), dp(14), dp(14));
         resultSummaryView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
         resultSummaryView.setText("暂无测试结果，请先运行一次测试");
+        resultSummaryView.setVisibility(View.GONE);
+        scrollRoot.addView(resultSummaryView, matchWrap());
 
-        if (wideLayout) {
-            LinearLayout summaryRow = new LinearLayout(this);
-            summaryRow.setOrientation(LinearLayout.HORIZONTAL);
-            summaryRow.addView(resultStatusView, new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
-            summaryRow.addView(space(dp(12), 1));
-            summaryRow.addView(resultSummaryView, new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f));
-            LinearLayout.LayoutParams rowParams = matchWrap();
-            rowParams.bottomMargin = dp(10);
-            summaryRow.setLayoutParams(rowParams);
-            root.addView(summaryRow);
-        } else {
-            LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            statusParams.bottomMargin = dp(10);
-            root.addView(resultStatusView, statusParams);
-            LinearLayout.LayoutParams rsp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            rsp.bottomMargin = dp(10);
-            resultSummaryView.setLayoutParams(rsp);
-            root.addView(resultSummaryView);
-        }
-
-        compareView = new TextView(this);
-        compareView.setTextSize(12);
-        compareView.setTextColor(INK);
-        compareView.setPadding(dp(12), dp(12), dp(12), dp(12));
-        compareView.setBackground(rounded(Palette.PRIMARY_SUBTLE, Palette.PRIMARY_BORDER, 12));
-        LinearLayout.LayoutParams cmp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        cmp.bottomMargin = dp(10);
+        compareView = new LinearLayout(this);
+        compareView.setOrientation(LinearLayout.VERTICAL);
+        compareView.setPadding(dp(14), dp(12), dp(14), dp(12));
+        compareView.setBackground(rounded(Palette.SURFACE, LINE, 12));
+        compareVerdictView = text("加速对比", 13, MUTED, Typeface.BOLD);
+        compareView.addView(compareVerdictView);
+        comparePrevView = smallText("", MUTED, Typeface.NORMAL);
+        comparePrevView.setPadding(0, dp(8), 0, 0);
+        compareView.addView(comparePrevView);
+        compareCurrView = text("", 13, INK, Typeface.BOLD);
+        compareCurrView.setPadding(0, dp(4), 0, 0);
+        compareView.addView(compareCurrView);
+        compareDeltaView = smallText("", BLUE, Typeface.NORMAL);
+        compareDeltaView.setPadding(0, dp(8), 0, 0);
+        compareView.addView(compareDeltaView);
+        LinearLayout.LayoutParams cmp = matchWrap();
+        cmp.topMargin = dp(12);
         compareView.setLayoutParams(cmp);
         compareView.setVisibility(View.GONE);
-        root.addView(compareView);
+        scrollRoot.addView(compareView);
 
         exportView = smallText("", MUTED, Typeface.NORMAL);
-        exportView.setPadding(dp(2), 0, dp(2), dp(6));
-        root.addView(exportView);
+        exportView.setPadding(dp(14), dp(14), dp(14), dp(14));
+        exportView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+        LinearLayout.LayoutParams expParams = matchWrap();
+        expParams.topMargin = dp(12);
+        exportView.setLayoutParams(expParams);
+        scrollRoot.addView(exportView);
 
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams brp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        brp.topMargin = dp(16);
-        btnRow.setLayoutParams(brp);
-        exportButton = button("导出结果", Palette.NEUTRAL_DARK, Color.WHITE);
-        retestButton = button("再次测试", Palette.SURFACE_SUBTLE, INK);
-        retestButton.setOnClickListener(v -> resetForRetest());
-        btnRow.addView(exportButton, new LinearLayout.LayoutParams(0, buttonHeight(), 1));
-        btnRow.addView(space(dp(12), 1));
-        btnRow.addView(retestButton, new LinearLayout.LayoutParams(0, buttonHeight(), 1));
-        root.addView(btnRow);
-        return sv;
+        return stickyFooterPage(scrollRoot, footer);
+    }
+
+    private View resultActionFooter(Button export, Button retest) {
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.addView(export, new LinearLayout.LayoutParams(0, buttonHeight(), 1f));
+        actions.addView(space(dp(12), 1));
+        actions.addView(retest, new LinearLayout.LayoutParams(0, buttonHeight(), 1f));
+        return actions;
+    }
+
+    private View resultPrimaryMetricGrid() {
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(wideLayout ? 4 : 2);
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = dp(14);
+        grid.setLayoutParams(params);
+        resultLossValue = resultMetricCard(grid, "丢包率", "—", GREEN);
+        resultAvgValue = resultMetricCard(grid, "Avg RTT", "—", BLUE);
+        resultP95Value = resultMetricCard(grid, "P95", "—", BLUE);
+        resultP99Value = resultMetricCard(grid, "P99", "—", ORANGE);
+        return grid;
+    }
+
+    private View resultSecondaryMetricGrid() {
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(wideLayout ? 4 : 2);
+        LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = dp(8);
+        grid.setLayoutParams(params);
+        resultSentValue = resultMetricCard(grid, "发包", "—", INK);
+        resultRecvValue = resultMetricCard(grid, "收包", "—", INK);
+        resultBurstValue = resultMetricCard(grid, "连续丢包", "—", RED);
+        resultJitterValue = resultMetricCard(grid, "抖动", "—", INK);
+        return grid;
+    }
+
+    private TextView resultMetricCard(GridLayout grid, String label, String value, int valueColor) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(10), dp(10), dp(10));
+        card.setBackground(rounded(Palette.SURFACE, LINE, 12));
+        card.addView(text(label, 11, MUTED, Typeface.NORMAL));
+        TextView valueView = text(value, wideLayout ? 20 : 18, valueColor, Typeface.BOLD);
+        valueView.setPadding(0, dp(4), 0, 0);
+        card.addView(valueView);
+        GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+        params.width = 0;
+        params.height = dp(wideLayout ? 76 : 68);
+        params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
+        params.setMargins(dp(3), dp(3), dp(3), dp(3));
+        grid.addView(card, params);
+        return valueView;
+    }
+
+    private String formatCompareDelta(String name, double prev, double curr, String unit) {
+        if (prev <= 0 && curr <= 0) {
+            return name + " ±0" + unit;
+        }
+        if (prev <= 0) {
+            return String.format(Locale.US, "%s %.0f%s", name, curr, unit);
+        }
+        double pct = (curr - prev) / prev * 100;
+        return String.format(Locale.US, "%s %+.0f%%", name, pct);
+    }
+
+    private String formatLossCompareDelta(double prevRate, double currRate) {
+        if (prevRate <= 0 && currRate <= 0) {
+            return "丢包 ±0%";
+        }
+        if (prevRate <= 0) {
+            return String.format(Locale.US, "丢包 %.1f%%", currRate * 100);
+        }
+        double pct = (currRate - prevRate) / prevRate * 100;
+        return String.format(Locale.US, "丢包 %+.0f%%", pct);
+    }
+
+    private String compareMetricLine(String tag, ProbeMetrics metrics) {
+        return String.format(Locale.US, "%s  Avg %.0fms · P95 %.0fms · 丢包 %.1f%% · 发 %d",
+                tag, metrics.avgRttMs, metrics.p95RttMs, metrics.lossRate * 100, metrics.sent);
     }
 
     private void populateResultPage(ProbeFlowState.Outcome outcome, String message, ProbeMetrics metrics) {
-        if (resultSummaryView == null || metrics == null) return;
+        if (resultStatusView == null || metrics == null) return;
         boolean responder = lastConfig != null && lastConfig.mqttRole == ProbeConfig.Role.RESPONDER;
         if (responder) {
             populateResponderResultPage(outcome, message, metrics);
             return;
         }
-        int samples = lastSamples == null ? 0 : lastSamples.size();
+        int sampleCount = lastSamples == null ? 0 : lastSamples.size();
         if (outcome == ProbeFlowState.Outcome.COMPLETED) {
             resultStatusView.setText("测试已完成");
             resultStatusView.setTextColor(GREEN);
             resultStatusView.setBackground(rounded(Palette.SUCCESS_SUBTLE, Palette.SUCCESS_BORDER, 12));
         } else if (outcome == ProbeFlowState.Outcome.STOPPED) {
-            resultStatusView.setText("测试已停止 · 已采集 " + samples + " 个样本");
+            resultStatusView.setText("测试已停止 · 已采集 " + sampleCount + " 个样本（在途包未计入丢包）");
             resultStatusView.setTextColor(ORANGE);
             resultStatusView.setBackground(rounded(Palette.WARNING_SUBTLE, Palette.WARNING_BORDER, 12));
         } else {
             String detail = message == null || message.isEmpty() ? "请检查参数与网络后重试" : message;
-            resultStatusView.setText(samples > 0
+            resultStatusView.setText(sampleCount > 0
                     ? "测试失败 · 以下为中断前的不完整数据\n" + detail
                     : "测试失败\n" + detail);
             resultStatusView.setTextColor(RED);
@@ -1269,28 +1364,48 @@ public final class MainActivity extends Activity {
         String proto = lastConfig != null ? lastConfig.protocol.label : "-";
         String server = lastConfig != null ? lastConfig.host + ":" + lastConfig.port : "-";
         if (outcome == ProbeFlowState.Outcome.FAILED && metrics.sent == 0) {
-            resultSummaryView.setText(String.format(Locale.US,
-                    "模式: %s   协议: %s\n服务器: %s\n\n尚未采集到有效探测数据",
-                    mode, proto, server));
+            if (resultMetaView != null) {
+                resultMetaView.setText(String.format(Locale.US, "%s · %s · %s", mode, proto, server));
+            }
+            clearResultMetricCards();
             return;
         }
-        resultSummaryView.setText(String.format(Locale.US,
-                "模式: %s   协议: %s\n服务器: %s\n%s\n" +
-                "发包: %d   收包: %d   丢包率: %.1f%%\n" +
-                "Avg RTT: %.0fms   P95: %.0fms   P99: %.0fms\n" +
-                "最大连续丢包: %d   抖动: %.1fms",
-                mode, proto, server,
-                weakNetResultLine(),
-                metrics.sent, metrics.received, metrics.lossRate * 100,
-                metrics.avgRttMs, metrics.p95RttMs, metrics.p99RttMs,
-                metrics.maxBurstLoss, metrics.jitterMs));
+        if (resultMetaView != null) {
+            String weak = weakNetResultLine();
+            resultMetaView.setText(String.format(Locale.US, "%s · %s · %s%s",
+                    mode, proto, server, weak.isEmpty() ? "" : "\n" + weak.trim()));
+            resultMetaView.setVisibility(View.VISIBLE);
+        }
+        if (resultSummaryView != null) resultSummaryView.setVisibility(View.GONE);
+        if (resultLossValue != null) {
+            resultLossValue.setText(String.format(Locale.US, "%.1f%%", metrics.lossRate * 100));
+            resultAvgValue.setText(String.format(Locale.US, "%.0fms", metrics.avgRttMs));
+            resultP95Value.setText(String.format(Locale.US, "%.0fms", metrics.p95RttMs));
+            resultP99Value.setText(String.format(Locale.US, "%.0fms", metrics.p99RttMs));
+            resultSentValue.setText(Integer.toString(metrics.sent));
+            resultRecvValue.setText(Integer.toString(metrics.received));
+            resultBurstValue.setText(Integer.toString(metrics.maxBurstLoss));
+            resultJitterValue.setText(String.format(Locale.US, "%.1fms", metrics.jitterMs));
+        }
+    }
+
+    private void clearResultMetricCards() {
+        if (resultLossValue == null) return;
+        resultLossValue.setText("—");
+        resultAvgValue.setText("—");
+        resultP95Value.setText("—");
+        resultP99Value.setText("—");
+        resultSentValue.setText("—");
+        resultRecvValue.setText("—");
+        resultBurstValue.setText("—");
+        resultJitterValue.setText("—");
     }
 
     private String weakNetResultLine() {
         if (lastConfig == null || !lastConfig.weakNetProfile.isActive()) {
             return "";
         }
-        return "弱网模拟: " + lastConfig.weakNetProfile.displaySummary() + "\n\n";
+        return "弱网模拟: " + lastConfig.weakNetProfile.displaySummary();
     }
 
     private WeakNetProfile readWeakNetProfile() {
@@ -1323,6 +1438,9 @@ public final class MainActivity extends Activity {
         resultSummaryView.setText(String.format(Locale.US,
                 "角色: 回显端   协议: MQTT\nBroker: %s\n订阅(本机SN): %s\n转发(对端SN): %s\n\n收到: %d   回显: %d",
                 server, sub, pub, metrics.sent, metrics.received));
+        resultSummaryView.setVisibility(View.VISIBLE);
+        if (resultMetaView != null) resultMetaView.setVisibility(View.GONE);
+        clearResultMetricCards();
         if (compareView != null) {
             compareView.setVisibility(View.GONE);
         }
@@ -1334,7 +1452,11 @@ public final class MainActivity extends Activity {
         card.addView(sectionTitle("连接目标", "协议与服务器地址", Palette.SECTION_CONNECTION));
 
         protocolSpinner = buildProtocolSpinner();
-        card.addView(field("协议", protocolSpinner, spinnerHeight()));
+        View protocolField = field("协议", protocolSpinner, spinnerHeight());
+        LinearLayout.LayoutParams protocolLp = matchWrap();
+        protocolLp.setMargins(0, dp(8), 0, 0);
+        protocolField.setLayoutParams(protocolLp);
+        card.addView(protocolField);
 
         hostInput = compactInput(DEFAULT_SIDE_CAR_HOST);
         hostSpinner = relayServerSpinner();
@@ -1422,12 +1544,16 @@ public final class MainActivity extends Activity {
         modeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (suppressModeSpinnerCallback) {
+                    return;
+                }
                 refreshVpnState();
+                boolean weakScene = position == 2 || position == 3;
+                refreshModeToggleUi(weakScene, position);
                 if (modeStatusView != null) {
                     modeStatusView.setText(position == 0 || position == 2 ? "基线测试" : "双发加速");
                 }
-                refreshModeToggle();
-                refreshWeakNetSectionExpanded();
+                scheduleWeakNetSectionRefresh();
             }
 
             @Override
@@ -1440,6 +1566,8 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams tp = matchWrap();
         tp.setMargins(dp(3), dp(8), dp(3), 0);
         toggleRow.setLayoutParams(tp);
+        modeToggleSelectedBg = buttonBackground(theme.accent);
+        modeToggleUnselectedBg = buttonBackground(theme.innerSurface);
         modeBaselineButton = button("基线（未加速）", theme.innerBorder, MUTED);
         modeAccelButton = button("云聚通加速", theme.accent, Color.WHITE);
         modeBaselineButton.setTextSize(12);
@@ -1469,12 +1597,8 @@ public final class MainActivity extends Activity {
         weakNetRow.addView(weakNetLabels, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         weakNetSceneSwitch = new Switch(this);
-        weakNetSceneSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            int sel = modeSpinner.getSelectedItemPosition();
-            boolean accel = sel == 1 || sel == 3;
-            modeSpinner.setSelection(isChecked ? (accel ? 3 : 2) : (accel ? 1 : 0));
-            refreshWeakNetSectionExpanded();
-        });
+        weakNetSceneSwitch.setChecked(false);
+        weakNetSceneSwitch.setOnCheckedChangeListener(this::onWeakNetSceneToggled);
         weakNetRow.addView(weakNetSceneSwitch);
         card.addView(weakNetRow);
         activeFieldTheme = null;
@@ -1483,11 +1607,43 @@ public final class MainActivity extends Activity {
 
     private void setModeSelection(boolean accel) {
         boolean weak = weakNetSceneSwitch != null && weakNetSceneSwitch.isChecked();
-        if (weak) {
-            modeSpinner.setSelection(accel ? 3 : 2);
-        } else {
-            modeSpinner.setSelection(accel ? 1 : 0);
+        int target = weak ? (accel ? 3 : 2) : (accel ? 1 : 0);
+        applyModeIndex(target, weak);
+        refreshVpnState();
+    }
+
+    private void applyModeIndex(int target, boolean weakScene) {
+        refreshModeToggleUi(weakScene, target);
+        if (modeStatusView != null) {
+            modeStatusView.setText(target == 0 || target == 2 ? "基线测试" : "双发加速");
         }
+        syncModeSpinner(target);
+        scheduleWeakNetSectionRefresh();
+    }
+
+    private int currentModeIndex() {
+        return modeSpinner != null ? modeSpinner.getSelectedItemPosition() : 0;
+    }
+
+    private void syncModeSpinner(int target) {
+        if (modeSpinner == null || modeSpinner.getSelectedItemPosition() == target) {
+            return;
+        }
+        suppressModeSpinnerCallback = true;
+        try {
+            modeSpinner.setSelection(target, false);
+        } finally {
+            suppressModeSpinnerCallback = false;
+        }
+    }
+
+    private void scheduleWeakNetSectionRefresh() {
+        View anchor = weakNetCollapsibleBody != null ? weakNetCollapsibleBody : modeBaselineButton;
+        if (anchor == null) {
+            return;
+        }
+        anchor.removeCallbacks(weakNetSectionRefreshTask);
+        anchor.post(weakNetSectionRefreshTask);
     }
 
     private View configWeakNetSection() {
@@ -1513,14 +1669,17 @@ public final class MainActivity extends Activity {
         if (weakNetSceneSwitch != null && weakNetSceneSwitch.isChecked() != weakScene) {
             weakNetSceneSwitch.setOnCheckedChangeListener(null);
             weakNetSceneSwitch.setChecked(weakScene);
-            weakNetSceneSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                int current = modeSpinner.getSelectedItemPosition();
-                boolean accel = current == 1 || current == 3;
-                modeSpinner.setSelection(isChecked ? (accel ? 3 : 2) : (accel ? 1 : 0));
-                refreshWeakNetSectionExpanded();
-            });
+            weakNetSceneSwitch.setOnCheckedChangeListener(this::onWeakNetSceneToggled);
         }
         setCollapsibleExpanded(weakNetCollapsibleBody, weakScene || hasWeakNetInput());
+        refreshModeToggleUi(weakScene, sel);
+    }
+
+    private void onWeakNetSceneToggled(android.widget.CompoundButton buttonView, boolean isChecked) {
+        int sel = currentModeIndex();
+        boolean accel = sel == 1 || sel == 3;
+        int target = isChecked ? (accel ? 3 : 2) : (accel ? 1 : 0);
+        applyModeIndex(target, isChecked);
     }
 
     private boolean hasWeakNetInput() {
@@ -2174,13 +2333,20 @@ public final class MainActivity extends Activity {
         String runId = flow.activeRunId();
         setRunningUi(false, "正在停止…");
         if (runner != null) runner.stop();
+        List<ProbeSample> samples = new ArrayList<>(lastSamples);
+        long timeoutNs = lastConfig != null ? lastConfig.timeoutMs * 1_000_000L : 1_500_000_000L;
+        ProbeMetrics stoppedMetrics = MetricsCalculator.calculate(
+                samples, System.nanoTime(), timeoutNs, false);
         finishRun(runId, ProbeFlowState.Outcome.STOPPED, "测试由用户停止",
-                lastMetrics, new ArrayList<>(lastSamples));
+                stoppedMetrics, samples);
     }
 
     private void finishRun(String runId, ProbeFlowState.Outcome outcome, String message,
                            ProbeMetrics metrics, List<ProbeSample> samples) {
         if (!flow.finish(runId, outcome, message)) return;
+        if (outcome == ProbeFlowState.Outcome.STOPPED) {
+            lastChartUpdateMs = 0;
+        }
         updateMetrics(metrics == null ? ProbeMetrics.empty() : metrics,
                 samples == null ? new ArrayList<>() : samples);
         applyResultPage(outcome, message);
@@ -2293,6 +2459,8 @@ public final class MainActivity extends Activity {
                 }
             } else if (lastMetrics.finalResult || nowNs - sample.clientSendNs > timeoutNs) {
                 status = "丢       —";
+            } else if (stopRequested || flow.outcome() == ProbeFlowState.Outcome.STOPPED) {
+                status = "未确认  —";
             } else {
                 status = "在途     …";
             }
@@ -2352,8 +2520,9 @@ public final class MainActivity extends Activity {
         long nowMs = System.currentTimeMillis();
         if (nowMs - lastChartUpdateMs >= 280) {
             long tms = lastConfig != null ? lastConfig.timeoutMs : 1500;
-            chartView.update(samples, metrics, tms);
-            packetEventStripView.update(samples, metrics, tms);
+            boolean stoppedEarly = stopRequested || flow.outcome() == ProbeFlowState.Outcome.STOPPED;
+            chartView.update(samples, metrics, tms, stoppedEarly);
+            packetEventStripView.update(samples, metrics, tms, stoppedEarly);
             scopeViewport.setTotalPoints(computeTotalPoints(samples));
             updatePacketRecords(samples);
             lastChartUpdateMs = nowMs;
@@ -2615,43 +2784,55 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshModeToggle() {
-        if (modeBaselineButton == null || modeAccelButton == null || modeSpinner == null) return;
-        Palette.SectionTheme theme = Palette.SECTION_MODE;
-        int sel = modeSpinner.getSelectedItemPosition();
-        boolean isBaseline = (sel == 0 || sel == 2);
-        boolean weakScene = sel == 2 || sel == 3;
+        boolean weakScene = weakNetSceneSwitch != null && weakNetSceneSwitch.isChecked();
+        refreshModeToggleUi(weakScene, currentModeIndex());
+    }
+
+    private void refreshModeToggleUi(boolean weakScene, int modeIndex) {
+        if (modeBaselineButton == null || modeAccelButton == null) {
+            return;
+        }
+        boolean accel = modeIndex == 1 || modeIndex == 3;
+        boolean isBaseline = !accel;
         modeBaselineButton.setText(weakScene ? "弱网基线" : "基线（未加速）");
         modeAccelButton.setText(weakScene ? "弱网加速" : "云聚通加速");
-        modeBaselineButton.setBackground(buttonBackground(isBaseline ? theme.accent : theme.innerSurface));
+        if (modeToggleSelectedBg != null && modeToggleUnselectedBg != null) {
+            modeBaselineButton.setBackground(isBaseline ? modeToggleSelectedBg : modeToggleUnselectedBg);
+            modeAccelButton.setBackground(isBaseline ? modeToggleUnselectedBg : modeToggleSelectedBg);
+        }
         modeBaselineButton.setTextColor(isBaseline ? Color.WHITE : MUTED);
-        modeBaselineButton.setElevation(isBaseline ? dp(1) : 0f);
-        modeAccelButton.setBackground(buttonBackground(isBaseline ? theme.innerSurface : theme.accent));
         modeAccelButton.setTextColor(isBaseline ? MUTED : Color.WHITE);
-        modeAccelButton.setElevation(isBaseline ? 0f : dp(1));
+        float selectedElev = isBaseline ? dp(1) : 0f;
+        float accelElev = isBaseline ? 0f : dp(1);
+        if (modeBaselineButton.getElevation() != selectedElev) {
+            modeBaselineButton.setElevation(selectedElev);
+        }
+        if (modeAccelButton.getElevation() != accelElev) {
+            modeAccelButton.setElevation(accelElev);
+        }
     }
 
     private void updateCompare(ProbeMetrics current, ProbeConfig cfg) {
-        if (compareView == null || current == null || cfg == null) return;
-        if (current.sent == 0) return; // 测试未发出任何包（连接失败等），忽略，不参与对比
+        if (compareView == null || compareVerdictView == null || current == null || cfg == null) return;
+        if (current.sent == 0) return;
 
         if (prevMetrics == null) {
-            // 第一次有效结果 — 记录为基准，显示提示
             prevMetrics = current;
             prevConfig = cfg;
-            compareView.setText(String.format(Locale.US,
-                    "基准已记录 [%s]  发=%d  Avg=%.0fms  P95=%.0fms  丢包=%.1f%%\n切换模式后再测一次即可对比",
-                    cfg.modeTag, current.sent, current.avgRttMs, current.p95RttMs, current.lossRate * 100));
-            compareView.setBackground(rounded(Palette.PRIMARY_SUBTLE, Palette.PRIMARY_BORDER, 12));
+            compareVerdictView.setText("加速对比");
+            comparePrevView.setText("基准已记录 · " + compareMetricLine("[" + cfg.modeTag + "]", current));
+            compareCurrView.setText("切换模式后再测，即可查看对比");
+            compareDeltaView.setText("");
+            compareView.setBackground(rounded(Palette.SURFACE, LINE, 12));
             compareView.setVisibility(View.VISIBLE);
             return;
         }
 
-        String prevLabel = prevConfig != null ? prevConfig.modeTag : "上次";
-        String fmtA = String.format(Locale.US, "  [%s]  Avg=%.0fms  P95=%.0fms  丢包=%.1f%%  发=%d",
-                prevLabel, prevMetrics.avgRttMs, prevMetrics.p95RttMs, prevMetrics.lossRate * 100, prevMetrics.sent);
-        String fmtB = String.format(Locale.US, "  [%s]  Avg=%.0fms  P95=%.0fms  丢包=%.1f%%  发=%d",
-                cfg.modeTag, current.avgRttMs, current.p95RttMs, current.lossRate * 100, current.sent);
-        // 正值代表相对基准恶化，负值代表改善
+        String prevTag = prevConfig != null ? prevConfig.modeTag : "上次";
+        String currTag = cfg.modeTag;
+        comparePrevView.setText("上次 · " + compareMetricLine("[" + prevTag + "]", prevMetrics));
+        compareCurrView.setText("本次 · " + compareMetricLine("[" + currTag + "]", current));
+
         double avgPct = prevMetrics.avgRttMs > 0
                 ? (current.avgRttMs - prevMetrics.avgRttMs) / prevMetrics.avgRttMs * 100 : 0;
         double p95Pct = prevMetrics.p95RttMs > 0
@@ -2662,26 +2843,17 @@ public final class MainActivity extends Activity {
         double lossPct = lossComputable
                 ? (current.lossRate - prevMetrics.lossRate) / prevMetrics.lossRate * 100
                 : (current.lossRate > 0 ? 999 : 0);
-        String lossDiff;
-        if (prevMetrics.lossRate <= 0 && current.lossRate <= 0) {
-            lossDiff = "丢包 ±0%";
-        } else if (!lossComputable) {
-            lossDiff = "丢包 +∞%";
-        } else {
-            lossDiff = String.format(Locale.US, "丢包 %+.0f%%", lossPct);
-        }
 
-        // 五档结论（参考设计文档判定标准；VPN 覆盖校验不在本期范围）
         String verdict;
         int subtle;
         int border;
         int minSamples = 50;
         if (current.sent < minSamples || prevMetrics.sent < minSamples) {
-            verdict = "数据无效 · 样本不足（建议每组 ≥ " + minSamples + " 包）";
+            verdict = "样本不足（建议每组 ≥ " + minSamples + " 包）";
             subtle = Palette.WARNING_SUBTLE;
             border = Palette.WARNING_BORDER;
         } else if (lossPct > 10 || p95Pct > 10 || p99Pct > 10) {
-            verdict = "负向效果 · 丢包/P95/P99 出现恶化";
+            verdict = "负向效果";
             subtle = Palette.DANGER_SUBTLE;
             border = Palette.DANGER_BORDER;
         } else if ((lossPct <= -50 || p95Pct <= -10) && p99Pct <= 10) {
@@ -2693,14 +2865,17 @@ public final class MainActivity extends Activity {
             subtle = Palette.SUCCESS_SUBTLE;
             border = Palette.SUCCESS_BORDER;
         } else {
-            verdict = "无明显效果（核心指标变化在 ±10% 内）";
-            subtle = Palette.PRIMARY_SUBTLE;
-            border = Palette.PRIMARY_BORDER;
+            verdict = "无明显效果";
+            subtle = Palette.SURFACE;
+            border = LINE;
         }
 
-        String delta = String.format(Locale.US, "  ∆ Avg %+.0f%%  P95 %+.0f%%  P99 %+.0f%%  %s",
-                avgPct, p95Pct, p99Pct, lossDiff);
-        compareView.setText("加速对比 · " + verdict + "\n" + fmtA + "\n" + fmtB + "\n" + delta);
+        compareVerdictView.setText("加速对比 · " + verdict);
+        compareDeltaView.setText(String.format(Locale.US, "%s · %s · %s · %s",
+                formatCompareDelta("Avg", prevMetrics.avgRttMs, current.avgRttMs, "ms"),
+                formatCompareDelta("P95", prevMetrics.p95RttMs, current.p95RttMs, "ms"),
+                formatCompareDelta("P99", prevMetrics.p99RttMs, current.p99RttMs, "ms"),
+                formatLossCompareDelta(prevMetrics.lossRate, current.lossRate)));
         compareView.setBackground(rounded(subtle, border, 12));
         compareView.setVisibility(View.VISIBLE);
         prevMetrics = current;
@@ -2947,8 +3122,16 @@ public final class MainActivity extends Activity {
         }
         int protocolIndex = clamp(prefs.getInt("protocol", 0), 0, 2);
         int modeIndex = clamp(prefs.getInt("mode", 0), 0, 3);
+        boolean weakNetScene = prefs.getBoolean("weakNetScene", false);
+        boolean accel = modeIndex == 1 || modeIndex == 3;
+        modeIndex = weakNetScene ? (accel ? 3 : 2) : (accel ? 1 : 0);
         int roleIndex = clamp(prefs.getInt("mqttRole", 0), 0, 1);
         protocolSpinner.setSelection(protocolIndex);
+        if (weakNetSceneSwitch != null) {
+            weakNetSceneSwitch.setOnCheckedChangeListener(null);
+            weakNetSceneSwitch.setChecked(weakNetScene);
+            weakNetSceneSwitch.setOnCheckedChangeListener(this::onWeakNetSceneToggled);
+        }
         modeSpinner.setSelection(modeIndex);
         if (mqttRoleSpinner != null) {
             mqttRoleSpinner.setSelection(roleIndex);
@@ -2973,8 +3156,8 @@ public final class MainActivity extends Activity {
         mqttDeviceMacInput.setText(prefs.getString("mqttDeviceMac", MqttDefaultProfile.DEVICE_MAC));
         loadWeakNetConfig(prefs);
         updateProtocolUi();
-        refreshModeToggle();
         refreshWeakNetSectionExpanded();
+        refreshModeToggle();
     }
 
     private void migrateMqttDefaultProfile(SharedPreferences prefs) {
@@ -3002,6 +3185,7 @@ public final class MainActivity extends Activity {
         SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
         editor.putInt("protocol", protocolSpinner.getSelectedItemPosition())
                 .putInt("mode", modeSpinner.getSelectedItemPosition())
+                .putBoolean("weakNetScene", weakNetSceneSwitch != null && weakNetSceneSwitch.isChecked())
                 .putInt("mqttRole", mqttRoleSpinner == null ? 0 : mqttRoleSpinner.getSelectedItemPosition())
                 .putString("host", selectedHost())
                 .putString("port", portInput.getText().toString().trim())

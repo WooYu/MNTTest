@@ -67,6 +67,8 @@ final class Palette {
     static final int CHART_BASELINE = LINE_STRONG;
     static final int CHART_AXIS_TEXT = FAINT;
     static final int CHART_TRACK = Color.rgb(244, 240, 248);
+    /** 中途停止时，尚未超时确认的在途包（非丢包）。 */
+    static final int CHART_PENDING = Color.rgb(196, 188, 210);
 
     // ── 参数页模块主题 ───────────────────────────────────────────
     /** 连接目标 · 天蓝 */
