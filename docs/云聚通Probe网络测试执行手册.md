@@ -528,7 +528,7 @@ ABBA 完整（1000 包/轮），VPN 已覆盖，弱网 Profile 一致，结论�
 | 文档 | 路径 |
 | --- | --- |
 | 总体设计 | `docs/云聚通Android网络测试工具设计.md` |
-| MVP 说明 | `docs/云聚通ProbeApp_MVP实现说明.md` |
+| 执行手册 | `docs/云聚通Probe网络测试执行手册.md` |
 | App 使用 | `android-probe-app/README.md` |
 | UDP Sidecar | `server/udp_echo_sidecar/README.md` |
 | OpenFEC 对标 | `References/OpenFEC与P2P测试对比_0806.xlsx` |
