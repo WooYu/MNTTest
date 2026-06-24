@@ -41,8 +41,14 @@ final class Palette {
     // ── 品牌主色（柔和靛紫） ─────────────────────────────────────
     static final int PRIMARY = Color.rgb(108, 92, 231);
     static final int PRIMARY_PRESSED = Color.rgb(92, 76, 210);
+    /** 主按钮渐变末端 / 深色强调。 */
+    static final int PRIMARY_DEEP = Color.rgb(78, 62, 198);
     static final int PRIMARY_SUBTLE = Color.rgb(241, 238, 255);
     static final int PRIMARY_BORDER = Color.rgb(204, 196, 255);
+    /** 次级文字链默认色。 */
+    static final int LINK = Color.rgb(98, 82, 210);
+    /** 底部操作栏顶部分隔阴影。 */
+    static final int SHADOW_LINE = Color.argb(28, 52, 48, 68);
 
     /** 次级深色按钮（导出等）。 */
     static final int NEUTRAL_DARK = Color.rgb(88, 78, 118);

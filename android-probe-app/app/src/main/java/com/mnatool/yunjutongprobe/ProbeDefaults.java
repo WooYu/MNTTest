@@ -25,6 +25,25 @@ final class ProbeDefaults {
             this.packetBytes = packetBytes;
             this.timeoutMs = timeoutMs;
         }
+
+        boolean matches(String count, String pps, String packetBytes, String timeoutMs) {
+            return this.count.equals(count)
+                    && this.pps.equals(pps)
+                    && this.packetBytes.equals(packetBytes)
+                    && this.timeoutMs.equals(timeoutMs);
+        }
+    }
+
+    static Preset detectPreset(String count, String pps, String packetBytes, String timeoutMs) {
+        if (count == null || pps == null || packetBytes == null || timeoutMs == null) {
+            return null;
+        }
+        for (Preset preset : Preset.values()) {
+            if (preset.matches(count.trim(), pps.trim(), packetBytes.trim(), timeoutMs.trim())) {
+                return preset;
+            }
+        }
+        return null;
     }
 
     /** 首屏预填档位：现场千级（时长短、最常用）。如需默认十万级改为 Preset.LAB。 */

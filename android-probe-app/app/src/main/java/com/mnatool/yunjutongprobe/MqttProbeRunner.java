@@ -360,7 +360,7 @@ final class MqttProbeRunner implements ProbeRunner {
         int remainingLength = 0;
         int encoded;
         do {
-            encoded = input.read();
+            encoded = readByteRetry();
             if (encoded < 0) {
                 throw new IllegalStateException("MQTT remaining length closed");
             }
@@ -372,15 +372,32 @@ final class MqttProbeRunner implements ProbeRunner {
         } while ((encoded & 128) != 0);
 
         byte[] body = new byte[remainingLength];
-        int offset = 0;
-        while (offset < remainingLength) {
-            int read = input.read(body, offset, remainingLength - offset);
-            if (read < 0) {
-                throw new IllegalStateException("MQTT body closed");
-            }
-            offset += read;
-        }
+        readFully(body, 0, remainingLength);
         return new MqttPacket(header, header >> 4, body);
+    }
+
+    /** 已收到 header 后的后续读：超时重试，避免 100ms soTimeout 中断半包读取。 */
+    private int readByteRetry() throws Exception {
+        while (true) {
+            try {
+                return input.read();
+            } catch (java.net.SocketTimeoutException ignored) {
+            }
+        }
+    }
+
+    private void readFully(byte[] buffer, int offset, int length) throws Exception {
+        int end = offset + length;
+        while (offset < end) {
+            try {
+                int read = input.read(buffer, offset, end - offset);
+                if (read < 0) {
+                    throw new IllegalStateException("MQTT body closed");
+                }
+                offset += read;
+            } catch (java.net.SocketTimeoutException ignored) {
+            }
+        }
     }
 
     private void sendPacket(int header, byte[] body) throws Exception {

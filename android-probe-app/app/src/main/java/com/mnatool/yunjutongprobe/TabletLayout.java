@@ -4,84 +4,241 @@ import android.content.Context;
 import android.util.DisplayMetrics;
 
 /**
- * 平板横屏布局常量。App 固定 landscape，以最小宽度 ≥ 720dp 判定宽屏（典型 10" 平板）。
+ * 横屏布局分档常量。
+ *
+ * <p>参考大屏：MaxiSys Ultra S2（13.7" · 2176×1600 · Android 13 · 横屏宽约 1100dp+）。</p>
  */
 final class TabletLayout {
-    private static final float WIDE_MIN_WIDTH_DP = 720f;
+    /** 10" 级平板横屏宽度下限。 */
+    private static final float TABLET_MIN_WIDTH_DP = 720f;
+    /** 13" 级大屏横屏宽度下限（含 MaxiSys Ultra S2）。 */
+    private static final float XL_MIN_WIDTH_DP = 1100f;
+
+    enum Tier {
+        /** 窄屏 / 小窗 */
+        COMPACT,
+        /** 10" 左右平板 */
+        TABLET,
+        /** 13.7" 级大屏 */
+        TABLET_XL
+    }
 
     private TabletLayout() {
     }
 
-    static boolean isWide(Context context) {
+    static Tier resolve(Context context) {
         DisplayMetrics dm = context.getResources().getDisplayMetrics();
-        return dm.widthPixels / dm.density >= WIDE_MIN_WIDTH_DP;
+        float widthDp = dm.widthPixels / dm.density;
+        if (widthDp >= XL_MIN_WIDTH_DP) {
+            return Tier.TABLET_XL;
+        }
+        if (widthDp >= TABLET_MIN_WIDTH_DP) {
+            return Tier.TABLET;
+        }
+        return Tier.COMPACT;
     }
 
-    static int pagePaddingH(boolean wide) {
-        return wide ? 28 : 14;
+    static boolean isWide(Context context) {
+        return resolve(context) != Tier.COMPACT;
     }
 
-    static int pagePaddingV(boolean wide) {
-        return wide ? 18 : 14;
+    static boolean useWideColumns(Tier tier) {
+        return tier != Tier.COMPACT;
     }
 
-    static int pagePaddingBottom(boolean wide) {
-        return wide ? 24 : 24;
+    static boolean useConfigThreeColumns(Tier tier) {
+        return tier == Tier.TABLET_XL;
     }
 
-    /** 配置卡片之间的垂直间距 */
-    static int sectionGapDp(boolean wide) {
-        return wide ? 24 : 16;
+    static int historyGridColumns(Tier tier) {
+        switch (tier) {
+            case TABLET_XL:
+                return 3;
+            case TABLET:
+                return 2;
+            default:
+                return 1;
+        }
     }
 
-    /** 参数页双栏之间的水平间距 */
-    static int columnGapDp(boolean wide) {
-        return wide ? 24 : 0;
+    static float monitorProbeColumnWeight(Tier tier) {
+        switch (tier) {
+            case TABLET_XL:
+                return 1.35f;
+            case TABLET:
+                return 1.15f;
+            default:
+                return 1f;
+        }
     }
 
-    /** 页面标题与首行配置卡片之间的间距 */
-    static int headerBottomGapDp(boolean wide) {
-        return wide ? 18 : 10;
+    static float monitorSideColumnWeight(Tier tier) {
+        switch (tier) {
+            case TABLET_XL:
+                return 0.65f;
+            case TABLET:
+                return 0.85f;
+            default:
+                return 1f;
+        }
     }
 
-    /** 配置区与底部操作按钮之间的间距 */
-    static int actionTopGapDp(boolean wide) {
-        return wide ? 22 : 16;
+    static float connectionHostWeight(Tier tier) {
+        return tier == Tier.COMPACT ? 1f : 1.5f;
     }
 
-    static int buttonHeightDp(boolean wide) {
-        return wide ? 56 : 50;
+    static int pageTitleSp(Tier tier) {
+        return pick(tier, 20, 22, 26);
     }
 
-    static int modeButtonHeightDp(boolean wide) {
-        return wide ? 52 : 48;
+    static int pageTitleLargeSp(Tier tier) {
+        return pick(tier, 22, 24, 28);
     }
 
-    static int fieldInputHeightDp(boolean wide) {
-        return wide ? 40 : 32;
+    static int sectionTitleSp(Tier tier) {
+        return pick(tier, 15, 15, 16);
     }
 
-    static int spinnerHeightDp(boolean wide) {
-        return wide ? 48 : 44;
+    static int stepLabelSp(Tier tier) {
+        return pick(tier, 11, 12, 13);
     }
 
-    static int fieldRowHeightDp(boolean wide) {
-        return wide ? 70 : 58;
+    static int heroAccentHeightDp(Tier tier) {
+        return pick(tier, 48, 56, 64);
     }
 
-    static int stepBarHeightDp(boolean wide) {
-        return wide ? 64 : 56;
+    static int stepBarPaddingHDp(Tier tier) {
+        return pick(tier, 14, 24, 32);
     }
 
-    static int rttChartHeightDp(boolean wide) {
-        return wide ? 168 : 114;
+    static int pageSubtitleBottomDp(Tier tier) {
+        return pick(tier, 8, 12, 14);
     }
 
-    static int packetRecordHeightDp(boolean wide) {
-        return wide ? 240 : 190;
+    static int metricCardHeightDp(Tier tier) {
+        return pick(tier, 78, 88, 98);
     }
 
-    static int eventLogHeightDp(boolean wide) {
-        return wide ? 220 : 150;
+    static int metricValueSp(Tier tier) {
+        return pick(tier, 22, 22, 26);
+    }
+
+    static int resultMetricValueSp(Tier tier) {
+        return pick(tier, 18, 20, 22);
+    }
+
+    static int resultMetricCardHeightDp(Tier tier) {
+        return pick(tier, 68, 76, 84);
+    }
+
+    static int resultPrimaryColumnCount(Tier tier) {
+        return tier == Tier.COMPACT ? 2 : 5;
+    }
+
+    static int resultSecondaryColumnCount(Tier tier) {
+        return tier == Tier.COMPACT ? 2 : 4;
+    }
+
+    static int responderHeroSp(Tier tier) {
+        return pick(tier, 42, 48, 54);
+    }
+
+    static int responderStatSp(Tier tier) {
+        return pick(tier, 24, 28, 32);
+    }
+
+    static int responderEventLogBonusDp(Tier tier) {
+        return pick(tier, 100, 140, 180);
+    }
+
+    static int primaryCtaTextSp(Tier tier) {
+        return pick(tier, 15, 16, 17);
+    }
+
+    static int pagePaddingH(Tier tier) {
+        return pick(tier, 14, 28, 44);
+    }
+
+    static int pagePaddingV(Tier tier) {
+        return pick(tier, 14, 18, 22);
+    }
+
+    static int pagePaddingBottom(Tier tier) {
+        return pick(tier, 24, 24, 28);
+    }
+
+    static int sectionGapDp(Tier tier) {
+        return pick(tier, 16, 24, 30);
+    }
+
+    static int columnGapDp(Tier tier) {
+        return tier == Tier.COMPACT ? 0 : (tier == Tier.TABLET_XL ? 36 : 24);
+    }
+
+    static int headerBottomGapDp(Tier tier) {
+        return pick(tier, 10, 18, 22);
+    }
+
+    static int actionTopGapDp(Tier tier) {
+        return pick(tier, 16, 22, 26);
+    }
+
+    static int configScrollBottomPaddingDp(Tier tier) {
+        return pick(tier, 28, 36, 44);
+    }
+
+    static int secondaryActionHeightDp(Tier tier) {
+        return pick(tier, 32, 36, 40);
+    }
+
+    static int buttonHeightDp(Tier tier) {
+        return pick(tier, 50, 56, 64);
+    }
+
+    static int primaryButtonHeightDp(Tier tier) {
+        return pick(tier, 54, 60, 68);
+    }
+
+    static int modeButtonHeightDp(Tier tier) {
+        return pick(tier, 48, 52, 56);
+    }
+
+    static int fieldInputHeightDp(Tier tier) {
+        return pick(tier, 32, 40, 46);
+    }
+
+    static int spinnerHeightDp(Tier tier) {
+        return pick(tier, 44, 48, 52);
+    }
+
+    static int fieldRowHeightDp(Tier tier) {
+        return pick(tier, 58, 70, 84);
+    }
+
+    static int stepBarHeightDp(Tier tier) {
+        return pick(tier, 56, 64, 72);
+    }
+
+    static int rttChartHeightDp(Tier tier) {
+        return pick(tier, 114, 168, 240);
+    }
+
+    static int packetRecordHeightDp(Tier tier) {
+        return pick(tier, 190, 240, 340);
+    }
+
+    static int eventLogHeightDp(Tier tier) {
+        return pick(tier, 150, 220, 300);
+    }
+
+    private static int pick(Tier tier, int compact, int tablet, int xl) {
+        switch (tier) {
+            case TABLET_XL:
+                return xl;
+            case TABLET:
+                return tablet;
+            default:
+                return compact;
+        }
     }
 }
