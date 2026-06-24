@@ -2,14 +2,20 @@ package com.mnatool.yunjutongprobe;
 
 import android.util.Log;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -40,6 +46,8 @@ final class MqttResponderRunner implements ProbeRunner {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicInteger receivedCount = new AtomicInteger(0);
     private final AtomicInteger echoedCount = new AtomicInteger(0);
+    private final List<EchoRecord> echoLog = Collections.synchronizedList(new ArrayList<>());
+    private final Set<String> echoSeen = ConcurrentHashMap.newKeySet();
     private final Object sendLock = new Object();
     private volatile Socket socket;
     private volatile InputStream input;
@@ -54,6 +62,8 @@ final class MqttResponderRunner implements ProbeRunner {
         }
         receivedCount.set(0);
         echoedCount.set(0);
+        echoLog.clear();
+        echoSeen.clear();
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -100,6 +110,7 @@ final class MqttResponderRunner implements ProbeRunner {
                     byte[] payload = extractPayload(packet);
                     if (payload != null) {
                         int got = receivedCount.incrementAndGet();
+                        recordEcho(payload);
                         sendPublish(config.mqttPublishTopic, payload);
                         int echoed = echoedCount.incrementAndGet();
                         logEchoProgress(callback, got, echoed, payload.length, sessionStartMs);
@@ -131,6 +142,7 @@ final class MqttResponderRunner implements ProbeRunner {
             ProbeMetrics finalMetrics = snapshot(true);
             Log.i(TAG, "responder done: received=" + finalMetrics.sent + " echoed=" + finalMetrics.received);
             callback.onMetrics(finalMetrics, Collections.emptyList());
+            callback.onEchoRecords(new ArrayList<>(echoLog));
             if (failure == null) {
                 callback.onFinished(finalMetrics, Collections.emptyList());
             } else {
@@ -189,6 +201,21 @@ final class MqttResponderRunner implements ProbeRunner {
         int echoed = echoedCount.get();
         return new ProbeMetrics(got, echoed, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, finalResult);
+    }
+
+    /** 解析探测包 payload 的 runId+seq，记录去程到达（含重复标记）。非探测包静默跳过。 */
+    private void recordEcho(byte[] payload) {
+        try {
+            JSONObject obj = new JSONObject(new String(payload, StandardCharsets.UTF_8));
+            String runId = obj.optString("runId", "");
+            int seq = obj.optInt("seq", -1);
+            if (runId.isEmpty() || seq < 0) {
+                return;
+            }
+            boolean duplicate = !echoSeen.add(runId + "#" + seq);
+            echoLog.add(new EchoRecord(runId, seq, System.currentTimeMillis(), duplicate));
+        } catch (Exception ignored) {
+        }
     }
 
     private byte[] extractPayload(MqttPacket packet) {

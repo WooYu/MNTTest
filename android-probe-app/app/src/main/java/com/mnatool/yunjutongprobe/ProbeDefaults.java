@@ -2,19 +2,43 @@ package com.mnatool.yunjutongprobe;
 
 import android.content.SharedPreferences;
 
-/** 方案 A：MQTT 探测推荐默认参数。 */
+/** 探测参数双档预设：现场千级（默认）与实验室十万级。 */
 final class ProbeDefaults {
     static final String PREFERENCE_VERSION_KEY = "probeDefaultsVersion";
-    static final int VERSION = 1;
+    static final int VERSION = 2;
 
-    static final String COUNT = "300";
-    static final String PPS = "5";
-    static final String PACKET_BYTES = "200";
-    static final String TIMEOUT_MS = "5000";
+    /** 参数预设档位：一键填充 发包数/速率/包大小/超时。 */
+    enum Preset {
+        FIELD("现场千级", "1000", "10", "200", "5000"),
+        LAB("实验室十万级", "100000", "2000", "1000", "60000");
 
-    private static final String LEGACY_COUNT = "500";
-    private static final String LEGACY_PPS = "20";
-    private static final String LEGACY_TIMEOUT_MS = "1200";
+        final String label;
+        final String count;
+        final String pps;
+        final String packetBytes;
+        final String timeoutMs;
+
+        Preset(String label, String count, String pps, String packetBytes, String timeoutMs) {
+            this.label = label;
+            this.count = count;
+            this.pps = pps;
+            this.packetBytes = packetBytes;
+            this.timeoutMs = timeoutMs;
+        }
+    }
+
+    /** 首屏预填档位：现场千级（时长短、最常用）。如需默认十万级改为 Preset.LAB。 */
+    static final Preset DEFAULT_PRESET = Preset.FIELD;
+
+    static final String COUNT = DEFAULT_PRESET.count;
+    static final String PPS = DEFAULT_PRESET.pps;
+    static final String PACKET_BYTES = DEFAULT_PRESET.packetBytes;
+    static final String TIMEOUT_MS = DEFAULT_PRESET.timeoutMs;
+
+    /** 方案 A（VERSION=1 旧默认）：仅当仍为此值时才迁移到现场千级。 */
+    private static final String LEGACY_COUNT = "300";
+    private static final String LEGACY_PPS = "5";
+    private static final String LEGACY_TIMEOUT_MS = "5000";
 
     private ProbeDefaults() {
     }
@@ -23,7 +47,7 @@ final class ProbeDefaults {
         return storedVersion < VERSION;
     }
 
-    /** 仅当仍为旧版默认探测参数时，一次性迁移到方案 A。 */
+    /** 仅当仍为旧版方案 A 默认参数时，一次性迁移到现场千级默认。 */
     static void migrateIfNeeded(SharedPreferences prefs) {
         int storedVersion = prefs.getInt(PREFERENCE_VERSION_KEY, 0);
         if (!requiresMigration(storedVersion)) {

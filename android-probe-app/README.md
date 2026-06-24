@@ -14,6 +14,11 @@
 - 检测系统 VPN 是否处于开启状态
 - 完成后导出 CSV 明细和 Summary JSON
 - 支持测试标签：未加速、云聚通加速、弱网基线、弱网加速
+- 探测参数双档预设：现场千级 / 实验室十万级，一键填充
+- App 内置「说明」入口，展示指标算法与参数/导出字段含义
+- 结果页自动查询本地历史，按 协议 + 档位 + modeTag 配对做加速对比
+- 回显端结束自动导出 `echo_received.csv`（去程到达记录），供方向级丢包对齐
+- 发包速率/滞后检测：实际 PPS 达不到目标时提示并写入 Summary，区分本机受限与网络问题
 
 ## 构建
 
@@ -80,7 +85,10 @@ adb install -r .\android-probe-app\app\build\outputs\apk\debug\app-debug.apk
 - `Protocol`：选择 `TCP Echo`
 - `Host`：TCP Echo Sidecar 所在服务器 IP 或域名
 - `Port`：自动切到 `9002`
-- `Count/PPS/Bytes/Timeout`：MQTT 推荐 `300/5/200/5000`（方案 A）；UDP/TCP 仍可用 `500/20/200/1200`
+- `Count/PPS/Bytes/Timeout`：探测参数区提供两档预设，点一下即填充：
+  - **现场千级**：`1000 / 10pps / 200B / 5000ms`（约 100s/轮，平板现场常用）
+  - **实验室十万级**：`100000 / 2000pps / 1000B / 60000ms`（约 50s 发包 + 10s 尾包，高 PPS 压测）
+  - 也可手动填写；超时上限 300000ms（5 分钟），十万级建议 ≥60000ms（单包等待 + 尾包窗口）
 
 ### MQTT 两台平板模型
 
@@ -121,13 +129,30 @@ App 会把最后一次填写的参数保存到设备本地私有目录，后续�
 
 ## 数据文件
 
-App 导出目录：
+App 导出目录（公共 Downloads，便于 adb pull 与文件管理器查看）：
 
 ```text
-/sdcard/Android/data/com.mnatool.yunjutongprobe/files/Documents/probe-runs/
+/sdcard/Download/YunJuTongProbe/<导出时间戳_runId>/
+  samples.csv         # 探测端逐包明细
+  summary.json        # 当前 run 的聚合指标
+  echo_received.csv   # 回显端去程到达记录（仅回显端导出）
 ```
 
-CSV 是逐包明细，Summary JSON 是当前 run 的聚合指标。对比云聚通效果时优先看 Summary JSON 的 `lossRate`、`p95RttMs`、`p99RttMs`、`jitterMs`、`maxBurstLoss`，CSV 用于定位异常片段。Summary 中的 `weakNetProfile` 记录 Clumsy/tc 等弱网注入参数，弱网 A/B 对比时必须保持一致。
+旧版私有目录 `.../files/Documents/probe-runs/` 仅用于首次启动时迁移，新导出均写入上表路径。
+
+`samples.csv` 是逐包明细，`summary.json` 是聚合指标。对比云聚通效果时优先看 Summary JSON 的 `lossRate`、`p95RttMs`、`p99RttMs`、`jitterMs`、`maxBurstLoss`，CSV 用于定位异常片段。Summary 中的 `weakNetProfile` 记录 Clumsy/tc 等弱网注入参数，弱网 A/B 对比时必须保持一致；`perf` 段记录 `targetPps/actualPps/maxSendLagMs/sendBehindCount/belowTarget`，`belowTarget=true` 表示本机发包未达标、该轮数据需谨慎采信。
+
+`echo_received.csv` 由回显端导出，列为 `run_id,seq,recv_ms,duplicate`。与探测端 `samples.csv` 配合可做方向级（去程/回程）丢包分析：
+
+```powershell
+python .\tools\loss_direction_report.py --samples <探测端>\samples.csv --echo <回显端>\echo_received.csv
+```
+
+分组批次（先全弱网 → 全加速 → 全未加速）采集后，按 协议 + 档位 + 弱网 Profile 分组对比加速/未加速：
+
+```powershell
+python .\tools\group_compare_report.py --dir <导出根目录> --out report.md
+```
 
 注意：TCP/MQTT 的 `lossRate` 表示应用层超时率，不等同于真实网络丢包率。真实丢包判断仍以 UDP Probe 为准。
 

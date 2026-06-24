@@ -35,6 +35,7 @@ final class ProbeStorage {
     static final String INDEX_FILE = "index.json";
     static final String CSV_NAME = "samples.csv";
     static final String SUMMARY_NAME = "summary.json";
+    static final String ECHO_CSV_NAME = "echo_received.csv";
     /** Excel（尤其中文 Windows）双击打开 CSV 时需 BOM 才能识别 UTF-8。 */
     private static final String UTF8_BOM = "\uFEFF";
 
@@ -63,6 +64,10 @@ final class ProbeStorage {
         return new File(runFolder(baseName), SUMMARY_NAME);
     }
 
+    static File echoCsvFileFor(String baseName) {
+        return new File(runFolder(baseName), ECHO_CSV_NAME);
+    }
+
     /** 旧版扁平文件名，用于兼容读取与迁移。 */
     static File legacyCsvFile(String baseName) {
         return new File(downloadsRoot(), baseName + ".csv");
@@ -81,6 +86,10 @@ final class ProbeStorage {
     }
 
     static File[] writeRun(Context context, ProbeConfig config, ProbeMetrics metrics, List<ProbeSample> samples) throws Exception {
+        return writeRun(context, config, metrics, samples, null);
+    }
+
+    static File[] writeRun(Context context, ProbeConfig config, ProbeMetrics metrics, List<ProbeSample> samples, ProbePerfStats perf) throws Exception {
         migrateLegacyIfNeeded(context);
         migrateFlatExportsIfNeeded(context);
         ensureDownloadsDir(context);
@@ -89,7 +98,7 @@ final class ProbeStorage {
         String base = "probe_" + stamp + "_" + config.runId;
 
         String csvContent = buildCsvContent(config, samples);
-        String summaryContent = buildSummaryContent(config, metrics);
+        String summaryContent = buildSummaryContent(config, metrics, perf);
 
         writeDownloadFile(context, base, CSV_NAME, "text/csv", csvContent);
         writeDownloadFile(context, base, SUMMARY_NAME, "application/json", summaryContent);
@@ -98,6 +107,27 @@ final class ProbeStorage {
         addIndexEntry(context, entry);
 
         return new File[]{csvFileFor(base), summaryFileFor(base)};
+    }
+
+    /** 回显端导出去程到达记录（runId+seq+到达时间），供 loss_direction_report.py 做方向级丢包对齐。 */
+    static File writeEchoRun(Context context, ProbeConfig config, List<EchoRecord> records) throws Exception {
+        ensureDownloadsDir(context);
+        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+        String base = "probe_" + stamp + "_" + config.runId;
+        writeDownloadFile(context, base, ECHO_CSV_NAME, "text/csv", buildEchoCsvContent(records));
+        return echoCsvFileFor(base);
+    }
+
+    private static String buildEchoCsvContent(List<EchoRecord> records) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("run_id,seq,recv_ms,duplicate\n");
+        for (EchoRecord record : records) {
+            builder.append(csv(record.runId)).append(',');
+            builder.append(record.seq).append(',');
+            builder.append(record.recvMs).append(',');
+            builder.append(record.duplicate).append('\n');
+        }
+        return UTF8_BOM + builder;
     }
 
     static List<ProbeRunRecord> listRuns(Context context) {
@@ -497,7 +527,7 @@ final class ProbeStorage {
         return UTF8_BOM + builder;
     }
 
-    private static String buildSummaryContent(ProbeConfig config, ProbeMetrics metrics) throws Exception {
+    private static String buildSummaryContent(ProbeConfig config, ProbeMetrics metrics, ProbePerfStats perf) throws Exception {
         JSONObject json = new JSONObject();
         json.put("runId", config.runId);
         json.put("protocol", config.protocol.label);
@@ -528,6 +558,9 @@ final class ProbeStorage {
         json.put("duplicate", metrics.duplicate);
         json.put("reordered", metrics.reordered);
         json.put("weakNetProfile", config.weakNetProfile.toJson());
+        if (perf != null) {
+            json.put("perf", perf.toJson());
+        }
         return json.toString(2);
     }
 

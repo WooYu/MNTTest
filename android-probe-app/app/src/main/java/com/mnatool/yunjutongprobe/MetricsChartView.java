@@ -122,11 +122,13 @@ public final class MetricsChartView extends ScopeChartView {
             return;
         }
 
-        double maxRtt = Math.max(10.0, metrics.maxRttMs);
+        double[] yRange = chartYRange(metrics);
+        double yMin = yRange[0];
+        double yMax = yRange[1];
         // 固定的 P50 / P95 / P99 水平参考线（与图例对应，不随数据滚动）
-        float p50Y = yForValue(metrics.p50RttMs, maxRtt, top, bottom);
-        float p95Y = yForValue(metrics.p95RttMs, maxRtt, top, bottom);
-        float p99Y = yForValue(metrics.p99RttMs, maxRtt, top, bottom);
+        float p50Y = yForValue(metrics.p50RttMs, yMin, yMax, top, bottom);
+        float p95Y = yForValue(metrics.p95RttMs, yMin, yMax, top, bottom);
+        float p99Y = yForValue(metrics.p99RttMs, yMin, yMax, top, bottom);
         canvas.drawLine(left, p99Y, width - right, p99Y, p99Paint);
         canvas.drawLine(left, p95Y, width - right, p95Y, p95Paint);
         canvas.drawLine(left, p50Y, width - right, p50Y, p50Paint);
@@ -184,7 +186,7 @@ public final class MetricsChartView extends ScopeChartView {
                 lastSeq = sample.seq;
                 continue;
             }
-            float y = yForValue(sample.rttMs(), maxRtt, top, bottom);
+            float y = yForValue(sample.rttMs(), yMin, yMax, top, bottom);
             if (!started || lastSeq == null || sample.seq - lastSeq > 1) {
                 linePath.moveTo(x, y);
                 started = true;
@@ -198,8 +200,26 @@ public final class MetricsChartView extends ScopeChartView {
         }
     }
 
-    private static float yForValue(double value, double maxRtt, int top, int bottom) {
-        return bottom - (float) Math.min(1.0, Math.max(0.0, value) / maxRtt) * (bottom - top);
+    /** Y 轴：下界贴最小 RTT，上界在 p99 与 max 间折中，避免离群尖峰压扁快路径波动。 */
+    private static double[] chartYRange(ProbeMetrics metrics) {
+        double yMin = Math.max(0.0, metrics.minRttMs - 2.0);
+        double rawMax = metrics.maxRttMs;
+        double p99Ceiling = metrics.p99RttMs > 0.0 ? metrics.p99RttMs * 1.08 : rawMax;
+        double yMax;
+        if (metrics.p99RttMs > 0.0 && rawMax > metrics.p99RttMs * 1.25) {
+            yMax = p99Ceiling;
+        } else {
+            yMax = Math.max(p99Ceiling, rawMax);
+        }
+        yMax = Math.max(yMin + 10.0, yMax);
+        return new double[]{yMin, yMax};
+    }
+
+    private static float yForValue(double value, double yMin, double yMax, int top, int bottom) {
+        double span = Math.max(1.0, yMax - yMin);
+        double normalized = (value - yMin) / span;
+        normalized = Math.min(1.0, Math.max(0.0, normalized));
+        return bottom - (float) normalized * (bottom - top);
     }
 
     private static void sortIfNeeded(List<ProbeSample> samples) {

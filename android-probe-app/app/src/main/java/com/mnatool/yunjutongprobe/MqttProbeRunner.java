@@ -92,6 +92,7 @@ final class MqttProbeRunner implements ProbeRunner {
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             long lastPingNs = System.nanoTime();
+            ProbePerfStats perf = new ProbePerfStats(config.pps);
             Log.i(TAG, "probe loop: count=" + config.count + " pps=" + config.pps + " topic=" + config.mqttPublishTopic);
             for (int seq = 0; seq < config.count && running.get(); seq++) {
                 long nowNs = System.nanoTime();
@@ -101,6 +102,7 @@ final class MqttProbeRunner implements ProbeRunner {
 
                 boolean vpnActive = config.vpnActiveAtStart;
                 long sendNs = System.nanoTime();
+                perf.beforeSend(sendNs, nextNs);
                 long sendMs = System.currentTimeMillis();
                 byte[] payload = ProbePayloadCodec.buildPayload(config, seq, sendNs, sendMs, vpnActive);
                 ProbeSample sample = new ProbeSample(
@@ -113,6 +115,7 @@ final class MqttProbeRunner implements ProbeRunner {
                 );
                 samples.put(seq, sample);
                 sendPublish(config.mqttPublishTopic, payload);
+                perf.afterSend();
                 if (seq % 50 == 0) {
                     Log.d(TAG, "publish seq=" + seq + "/" + config.count
                             + " highestRecv=" + highestReceivedSeq.get());
@@ -124,11 +127,16 @@ final class MqttProbeRunner implements ProbeRunner {
                     sendPingReq();
                     lastPingNs = metricsNow;
                 }
-                if (metricsNow - lastMetricsNs >= 250_000_000L) {
+                if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
                 }
             }
+            perf.markEnd(System.nanoTime());
+            if (perf.belowTarget()) {
+                callback.onEvent(perf.warningText());
+            }
+            callback.onPerfStats(perf);
 
             long waitUntilNs = System.nanoTime() + timeoutNs;
             while (running.get() && System.nanoTime() < waitUntilNs) {

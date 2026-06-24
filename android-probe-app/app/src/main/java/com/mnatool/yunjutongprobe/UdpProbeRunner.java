@@ -58,6 +58,7 @@ final class UdpProbeRunner implements ProbeRunner {
             long intervalNs = 1_000_000_000L / Math.max(1, config.pps);
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
+            ProbePerfStats perf = new ProbePerfStats(config.pps);
             for (int seq = 0; seq < config.count && running.get(); seq++) {
                 long nowNs = System.nanoTime();
                 if (nowNs < nextNs) {
@@ -66,6 +67,7 @@ final class UdpProbeRunner implements ProbeRunner {
 
                 boolean vpnActive = config.vpnActiveAtStart;
                 long sendNs = System.nanoTime();
+                perf.beforeSend(sendNs, nextNs);
                 byte[] payload = ProbePayloadCodec.buildPayload(config, seq, sendNs, System.currentTimeMillis(), vpnActive);
                 ProbeSample sample = new ProbeSample(
                         config.runId,
@@ -77,14 +79,20 @@ final class UdpProbeRunner implements ProbeRunner {
                 );
                 samples.put(seq, sample);
                 socket.send(new DatagramPacket(payload, payload.length, address, config.port));
+                perf.afterSend();
                 nextNs += intervalNs;
 
                 long metricsNow = System.nanoTime();
-                if (metricsNow - lastMetricsNs >= 250_000_000L) {
+                if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
                 }
             }
+            perf.markEnd(System.nanoTime());
+            if (perf.belowTarget()) {
+                callback.onEvent(perf.warningText());
+            }
+            callback.onPerfStats(perf);
 
             long waitUntilNs = System.nanoTime() + timeoutNs;
             while (running.get() && System.nanoTime() < waitUntilNs) {

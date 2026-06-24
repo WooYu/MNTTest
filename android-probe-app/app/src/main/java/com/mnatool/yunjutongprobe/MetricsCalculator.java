@@ -30,7 +30,6 @@ final class MetricsCalculator {
         int jitterCount = 0;
 
         for (ProbeSample sample : ordered) {
-            boolean expired = nowNs - sample.clientSendNs >= timeoutNs;
             if (sample.received()) {
                 received++;
                 burst = 0;
@@ -48,7 +47,9 @@ final class MetricsCalculator {
                 if (sample.reordered) {
                     reordered++;
                 }
-            } else if (finalResult || expired) {
+            } else if (finalResult) {
+                // 只在最终结算时把未收包计为丢包。运行中不按单包超时计丢，避免发包时长接近/超过
+                // timeout 时实时丢包率虚高；运行中的超时包仍由图表丢包柱（按 timeout 独立判定）实时呈现。
                 lost++;
                 burst++;
                 maxBurst = Math.max(maxBurst, burst);
