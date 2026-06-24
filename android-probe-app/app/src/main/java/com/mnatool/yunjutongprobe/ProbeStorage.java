@@ -769,8 +769,9 @@ final class ProbeStorage {
     }
 
     static String parseExportStamp(String base) {
-        if (base.startsWith("probe_") && base.length() > 22) {
-            return base.substring(6, 21).replace('_', ' ');
+        // probe_yyyyMMdd_HHmmss_runId → "yyyyMMdd HHmmss"
+        if (base.startsWith("probe_") && base.length() >= 21 && base.charAt(14) == '_') {
+            return base.substring(6, 14) + " " + base.substring(15, 21);
         }
         return base;
     }

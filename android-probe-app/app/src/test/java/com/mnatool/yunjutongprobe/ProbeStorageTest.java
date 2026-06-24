@@ -85,6 +85,12 @@ public class ProbeStorageTest {
     }
 
     @Test
+    public void parseExportStampKeepsFullSecondPrecision() {
+        assertEquals("20250624 195223",
+                ProbeStorage.parseExportStamp("probe_20250624_195223_run-abc"));
+    }
+
+    @Test
     public void listRunsSortsByExportStampDescending() throws Exception {
         File root = temp.newFolder("probe-runs");
         writeSummary(root, "probe_20250620_100000_older_summary.json", "older");
