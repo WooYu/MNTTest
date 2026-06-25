@@ -45,6 +45,8 @@ final class MqttResponderRunner implements ProbeRunner {
     /** 联调期：启动后一段时间内逐条记日志（与高 PPS 下快速确认效果）。 */
     private static final long DETAILED_LOG_WINDOW_MS = 30_000L;
     private static final int MILESTONE_INTERVAL = 50;
+    /** 运行状态页事件栏最小刷新间隔，避免高 PPS 下 onEvent 洪泛卡死主线程。 */
+    private static final long UI_EVENT_MIN_INTERVAL_MS = 500L;
     /** 入站待回显队列容量；满时读线程阻塞，对 Broker 施加背压。 */
     private static final int INCOMING_QUEUE_CAPACITY = 4096;
     /** 批量 flush，减少每包 syscall。 */
@@ -69,6 +71,7 @@ final class MqttResponderRunner implements ProbeRunner {
     private volatile boolean recordEchoSeq = true;
     private int packetId = 1;
     private int sendsSinceFlush = 0;
+    private long lastProgressUiMs = 0L;
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -81,6 +84,7 @@ final class MqttResponderRunner implements ProbeRunner {
         echoLog.clear();
         echoSeen.clear();
         readerFailure.set(null);
+        lastProgressUiMs = 0L;
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -259,26 +263,26 @@ final class MqttResponderRunner implements ProbeRunner {
         logEchoProgress(callback, receivedCount.get(), echoed, stamped.payload.length, sessionStartMs);
     }
 
-    private static void logEchoProgress(ProbeCallback callback, int got, int echoed,
+    /** 仅首条与里程碑向 UI 汇报；联调期逐条细节只写 Logcat，避免高 PPS 主线程卡死。 */
+    private void logEchoProgress(ProbeCallback callback, int got, int echoed,
             int payloadBytes, long sessionStartMs) {
         long elapsedMs = Math.max(1, System.currentTimeMillis() - sessionStartMs);
         if (got == 1) {
+            lastProgressUiMs = System.currentTimeMillis();
             callback.onEvent("收到首条消息（" + payloadBytes + " 字节），开始回显");
             return;
         }
-        boolean densePeriod = got <= DETAILED_LOG_MAX_COUNT || elapsedMs <= DETAILED_LOG_WINDOW_MS;
-        boolean milestone = got % MILESTONE_INTERVAL == 0;
-        if (!densePeriod && !milestone) {
+        if (got % MILESTONE_INTERVAL != 0) {
             return;
         }
-        if (milestone) {
-            callback.onEvent(String.format(Locale.US,
-                    "已回显 %d 条 · 约 %.1f msg/s · 最近 %d 字节",
-                    echoed, got * 1000.0 / elapsedMs, payloadBytes));
-        } else {
-            callback.onEvent(String.format(Locale.US,
-                    "已回显第 %d 条（%d 字节）", got, payloadBytes));
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastProgressUiMs < UI_EVENT_MIN_INTERVAL_MS) {
+            return;
         }
+        lastProgressUiMs = nowMs;
+        callback.onEvent(String.format(Locale.US,
+                "已回显 %d 条 · 约 %.1f msg/s · 最近 %d 字节",
+                echoed, got * 1000.0 / elapsedMs, payloadBytes));
     }
 
     private static String buildEndSummary(int echoed, long sessionStartMs) {

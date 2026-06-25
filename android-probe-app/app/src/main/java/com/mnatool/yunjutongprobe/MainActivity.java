@@ -355,6 +355,10 @@ public final class MainActivity extends Activity {
         headerSubtitleView.setLineSpacing(dp(2), 1f);
         content.addView(headerSubtitleView);
 
+        TextView versionView = smallText("v" + appVersionName(), MUTED, Typeface.NORMAL);
+        versionView.setPadding(0, dp(4), 0, 0);
+        content.addView(versionView);
+
         LinearLayout chips = new LinearLayout(this);
         chips.setOrientation(LinearLayout.HORIZONTAL);
         chips.setPadding(0, dp(10), 0, 0);
@@ -387,6 +391,14 @@ public final class MainActivity extends Activity {
         chip.setSingleLine(true);
         chip.setEllipsize(android.text.TextUtils.TruncateAt.END);
         return chip;
+    }
+
+    private String appVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return "?";
+        }
     }
 
     private void refreshConfigHeaderChips() {
@@ -2046,17 +2058,21 @@ public final class MainActivity extends Activity {
     }
 
     private View configWeakNetSection() {
-        activeFieldTheme = Palette.SECTION_WEAK_NET;
+        Palette.SectionTheme theme = Palette.SECTION_WEAK_NET;
+        activeFieldTheme = theme;
+        LinearLayout card = sectionPanel(theme, false);
         View[] section = collapsibleSection(
                 "弱网模拟",
                 "Clumsy 等注入参数，写入 Summary 便于对比",
                 false,
-                Palette.SECTION_WEAK_NET
+                false,
+                theme
         );
         weakNetCollapsibleBody = (LinearLayout) section[1];
         weakNetCollapsibleBody.addView(weakNetConfigBlock());
+        card.addView(section[0]);
         activeFieldTheme = null;
-        return section[0];
+        return card;
     }
 
     private void refreshWeakNetSectionExpanded() {
@@ -2110,11 +2126,8 @@ public final class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(2), dp(2), dp(2), dp(2));
         Drawable headerRippleBg = rounded(theme.innerSurface, theme.innerBorder, Palette.RADIUS_INNER);
-        if (!asPanel) {
-            header.setPadding(dp(10), dp(10), dp(10), dp(10));
-        }
+        header.setPadding(dp(10), dp(10), dp(10), dp(10));
         header.setBackground(new RippleDrawable(
                 ColorStateList.valueOf(Palette.withAlpha(theme.accent, 40)),
                 headerRippleBg,
@@ -2716,7 +2729,9 @@ public final class MainActivity extends Activity {
                     runOnUiThread(() -> {
                         if (!flow.accepts(runId)) return;
                         updateMetrics(metrics, samples);
-                        updateMetricsLine(metrics);
+                        if (!responder) {
+                            updateMetricsLine(metrics);
+                        }
                     });
                 }
 
