@@ -12,6 +12,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -341,9 +342,24 @@ final class MqttProbeRunner implements ProbeRunner {
         sample.serverRecvNs = ack.optLong("serverRecvNs", 0);
         sample.serverSendNs = ack.optLong("serverSendNs", 0);
         double rttMs = (sample.clientRecvNs - sample.clientSendNs) / 1_000_000.0;
-        Log.d(TAG, "echo seq=" + seq + " rtt=" + String.format(java.util.Locale.US, "%.1f", rttMs) + "ms");
+        Log.d(TAG, formatEchoRttLog(seq, sample, rttMs));
         int previousHigh = highestReceivedSeq.getAndUpdate(old -> Math.max(old, seq));
         sample.reordered = previousHigh > seq;
+    }
+
+    /** 探测端 RTT 日志：有回显时间戳时拆分 out（去程）/ echo（回显处理）/ ret（回程）。 */
+    private static String formatEchoRttLog(int seq, ProbeSample sample, double rttMs) {
+        String base = "echo seq=" + seq + " rtt=" + String.format(Locale.US, "%.1f", rttMs) + "ms";
+        if (sample.serverRecvNs <= 0 || sample.serverSendNs <= 0) {
+            return base;
+        }
+        double outMs = (sample.serverRecvNs - sample.clientSendNs) / 1_000_000.0;
+        double echoMs = (sample.serverSendNs - sample.serverRecvNs) / 1_000_000.0;
+        double retMs = (sample.clientRecvNs - sample.serverSendNs) / 1_000_000.0;
+        return base
+                + " out=" + String.format(Locale.US, "%.1f", outMs)
+                + " echo=" + String.format(Locale.US, "%.2f", echoMs)
+                + " ret=" + String.format(Locale.US, "%.1f", retMs);
     }
 
     private MqttPacket readPacket() throws Exception {

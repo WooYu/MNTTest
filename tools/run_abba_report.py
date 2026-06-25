@@ -63,6 +63,16 @@ def weak_net_line(data: dict[str, Any]) -> str:
     return "，".join(parts)
 
 
+def weak_net_setting(data: dict[str, Any]) -> dict[str, str]:
+    """提取 Clumsy 注入设定值（丢包% / 延迟ms / 抖动ms）。"""
+    wn = data.get("weakNetProfile") or {}
+    return {
+        "loss": str(wn.get("lossPercent", "") or ""),
+        "delay": str(wn.get("delayMs", "") or ""),
+        "jitter": str(wn.get("jitterMs", "") or ""),
+    }
+
+
 def verdict(improvements: dict[str, float | None]) -> str:
     loss = improvements.get("lossRate")
     p95 = improvements.get("p95RttMs")
@@ -141,6 +151,43 @@ def build_report(
     for label, data in [("A1", a1), ("B1", b1), ("B2", b2), ("A2", a2)]:
         lines.append(f"- **{label}:** {weak_net_line(data)}")
 
+    setting = weak_net_setting(a1)
+    has_weak = any(
+        weak_net_setting(d)["loss"] or weak_net_setting(d)["delay"] or weak_net_setting(d)["jitter"]
+        for d in [a1, b1, b2, a2]
+    )
+    if has_weak:
+        a_loss_pct = avg([float(r.get("lossRate", 0)) for r in a_runs]) * 100
+        b_loss_pct = avg([float(r.get("lossRate", 0)) for r in b_runs]) * 100
+        a_jit = avg([float(r.get("jitterMs", 0)) for r in a_runs])
+        b_jit = avg([float(r.get("jitterMs", 0)) for r in b_runs])
+        a_rtt = avg([float(r.get("avgRttMs", 0)) for r in a_runs])
+        b_rtt = avg([float(r.get("avgRttMs", 0)) for r in b_runs])
+        set_loss = f"{setting['loss']}%" if setting["loss"] else "—"
+        set_jit = f"{setting['jitter']} ms" if setting["jitter"] else "—"
+        set_delay = f"+{setting['delay']} ms" if setting["delay"] else "—"
+        lines.append("")
+        lines.append("## 弱网设定 vs 实测对照")
+        lines.append("")
+        lines.append(
+            "> 设定 = Clumsy 注入值；实测 = 探测端往返统计。丢包率变化按百分点(pp)；"
+            "时延注入体现在 RTT 增量（双平板含四段中转，仅供趋势参考）。"
+        )
+        lines.append("")
+        lines.append("| 指标 | Clumsy 设定 | 加速前实测 (A 组) | 加速后实测 (B 组) | A→B 变化 |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append(
+            f"| 丢包率 | {set_loss} | {a_loss_pct:.2f}% | {b_loss_pct:.2f}% | "
+            f"{b_loss_pct - a_loss_pct:+.2f} pp |"
+        )
+        lines.append(
+            f"| 抖动 | {set_jit} | {a_jit:.1f} ms | {b_jit:.1f} ms | {b_jit - a_jit:+.1f} ms |"
+        )
+        lines.append(
+            f"| 时延 (RTT 参考) | {set_delay} | {a_rtt:.0f} ms | {b_rtt:.0f} ms | "
+            f"{b_rtt - a_rtt:+.0f} ms |"
+        )
+
     lines.append("")
     lines.append("## B 组相对 A 组改善（均值）")
     lines.append("")
@@ -200,7 +247,7 @@ def main() -> int:
     parser.add_argument("--b2", required=True, type=Path)
     parser.add_argument("--a2", required=True, type=Path)
     parser.add_argument("--scene", default="未命名场景")
-    parser.add_argument("--out", type=Path, default="")
+    parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
     report = build_report(

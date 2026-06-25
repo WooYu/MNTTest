@@ -5,12 +5,12 @@ import android.content.SharedPreferences;
 /** 探测参数双档预设：现场千级（默认）与实验室十万级。 */
 final class ProbeDefaults {
     static final String PREFERENCE_VERSION_KEY = "probeDefaultsVersion";
-    static final int VERSION = 2;
+    static final int VERSION = 3;
 
     /** 参数预设档位：一键填充 发包数/速率/包大小/超时。 */
     enum Preset {
         FIELD("现场千级", "1000", "10", "200", "5000"),
-        LAB("实验室十万级", "100000", "2000", "1000", "60000");
+        LAB("实验室十万级", "100000", "500", "1000", "60000");
 
         final String label;
         final String count;
@@ -46,6 +46,16 @@ final class ProbeDefaults {
         return null;
     }
 
+    /** 实验室十万级等高 PPS 场景不在回显端逐条记 seq，避免 echoLog/GC 成为瓶颈。 */
+    static boolean recordEchoSeqForConfig(int count, int pps, int packetBytes, int timeoutMs) {
+        Preset preset = detectPreset(
+                String.valueOf(count),
+                String.valueOf(pps),
+                String.valueOf(packetBytes),
+                String.valueOf(timeoutMs));
+        return preset != Preset.LAB;
+    }
+
     /** 首屏预填档位：现场千级（时长短、最常用）。如需默认十万级改为 Preset.LAB。 */
     static final Preset DEFAULT_PRESET = Preset.FIELD;
 
@@ -58,6 +68,10 @@ final class ProbeDefaults {
     private static final String LEGACY_COUNT = "300";
     private static final String LEGACY_PPS = "5";
     private static final String LEGACY_TIMEOUT_MS = "5000";
+    /** VERSION=2 实验室十万级曾用 2000 PPS（测试 Broker 易过载），迁移为 500。 */
+    private static final String LEGACY_LAB_COUNT = "100000";
+    private static final String LEGACY_LAB_PPS = "2000";
+    private static final String LEGACY_LAB_BYTES = "1000";
 
     private ProbeDefaults() {
     }
@@ -82,6 +96,11 @@ final class ProbeDefaults {
         }
         if (LEGACY_TIMEOUT_MS.equals(prefs.getString("timeoutMs", LEGACY_TIMEOUT_MS))) {
             editor.putString("timeoutMs", TIMEOUT_MS);
+        }
+        if (LEGACY_LAB_COUNT.equals(prefs.getString("count", ""))
+                && LEGACY_LAB_PPS.equals(prefs.getString("pps", ""))
+                && LEGACY_LAB_BYTES.equals(prefs.getString("packetBytes", ""))) {
+            editor.putString("pps", Preset.LAB.pps);
         }
         editor.apply();
     }

@@ -29,7 +29,7 @@ public class ProbeDefaultsTest {
     public void labPresetMatchesHundredThousand() {
         ProbeDefaults.Preset lab = ProbeDefaults.Preset.LAB;
         assertEquals("100000", lab.count);
-        assertEquals("2000", lab.pps);
+        assertEquals("500", lab.pps);
         assertEquals("1000", lab.packetBytes);
         assertEquals("60000", lab.timeoutMs);
     }

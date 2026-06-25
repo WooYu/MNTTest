@@ -2,8 +2,6 @@ package com.mnatool.yunjutongprobe;
 
 import android.util.Log;
 
-import org.json.JSONObject;
-
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -15,18 +13,24 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * MQTT 回显端（Responder）。
  *
  * 用于“两台平板”模型：本机作为被测端连接同一个 Broker，订阅本机 SN（mqttSubscribeTopic），
- * 收到探测端发来的 payload 后原样转发到对端 SN（mqttPublishTopic），从而替代原先的
- * Python Echo Sidecar。它不计算 RTT，只持续回显，直到用户停止。
+ * 收到探测端发来的 payload 后写入 {@code serverRecvNs/serverSendNs} 再转发到对端 SN
+ * （mqttPublishTopic），从而替代原先的 Python Echo Sidecar。它不计算 RTT，只持续回显，直到用户停止。
+ *
+ * 高 PPS 下采用读线程 + 有界队列 + 回显线程，避免单线程读-处理-发串行积压；实验室十万级不落 echoLog。
  */
 final class MqttResponderRunner implements ProbeRunner {
     private static final String TAG = "ProbeApp";
@@ -41,6 +45,10 @@ final class MqttResponderRunner implements ProbeRunner {
     /** 联调期：启动后一段时间内逐条记日志（与高 PPS 下快速确认效果）。 */
     private static final long DETAILED_LOG_WINDOW_MS = 30_000L;
     private static final int MILESTONE_INTERVAL = 50;
+    /** 入站待回显队列容量；满时读线程阻塞，对 Broker 施加背压。 */
+    private static final int INCOMING_QUEUE_CAPACITY = 4096;
+    /** 批量 flush，减少每包 syscall。 */
+    private static final int FLUSH_EVERY_N_SENDS = 16;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -49,10 +57,18 @@ final class MqttResponderRunner implements ProbeRunner {
     private final List<EchoRecord> echoLog = Collections.synchronizedList(new ArrayList<>());
     private final Set<String> echoSeen = ConcurrentHashMap.newKeySet();
     private final Object sendLock = new Object();
+    private final ByteArrayOutputStream publishBodyBuffer = new ByteArrayOutputStream(2048);
+    private final ByteArrayOutputStream packetBuffer = new ByteArrayOutputStream(4096);
+    private final AtomicReference<Throwable> readerFailure = new AtomicReference<>();
     private volatile Socket socket;
     private volatile InputStream input;
     private volatile OutputStream output;
+    private volatile BlockingQueue<IncomingProbe> incomingQueue;
+    private volatile Thread readerThread;
+    private volatile String publishTopic = "";
+    private volatile boolean recordEchoSeq = true;
     private int packetId = 1;
+    private int sendsSinceFlush = 0;
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -64,6 +80,7 @@ final class MqttResponderRunner implements ProbeRunner {
         echoedCount.set(0);
         echoLog.clear();
         echoSeen.clear();
+        readerFailure.set(null);
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -96,28 +113,36 @@ final class MqttResponderRunner implements ProbeRunner {
             waitForConnack(config.timeoutMs);
             sendSubscribe(config.mqttSubscribeTopic);
             waitForSuback(config.timeoutMs);
+            publishTopic = config.mqttPublishTopic;
+            recordEchoSeq = ProbeDefaults.recordEchoSeqForConfig(
+                    config.count, config.pps, config.packetBytes, config.timeoutMs);
+            if (!recordEchoSeq) {
+                Log.i(TAG, "responder high-pps mode: skip per-seq echoLog");
+            }
             callback.onEvent("回显端已就绪，订阅 " + config.mqttSubscribeTopic
                     + "，将原样转发到 " + config.mqttPublishTopic);
             callback.onMetrics(snapshot(false), Collections.emptyList());
 
+            incomingQueue = new ArrayBlockingQueue<>(INCOMING_QUEUE_CAPACITY);
+            sessionStartMs = System.currentTimeMillis();
+            readerThread = new Thread(this::readLoop, "mqtt-responder-reader");
+            readerThread.start();
+
             long lastPingNs = System.nanoTime();
             long lastMetricsNs = System.nanoTime();
-            sessionStartMs = System.currentTimeMillis();
             while (running.get()) {
-                MqttPacket packet = readPacket();
-                long nowNs = System.nanoTime();
-                if (packet != null && packet.type == MQTT_PUBLISH) {
-                    byte[] payload = extractPayload(packet);
-                    if (payload != null) {
-                        int got = receivedCount.incrementAndGet();
-                        recordEcho(payload);
-                        sendPublish(config.mqttPublishTopic, payload);
-                        int echoed = echoedCount.incrementAndGet();
-                        logEchoProgress(callback, got, echoed, payload.length, sessionStartMs);
-                    }
+                IncomingProbe item = incomingQueue.poll(50, TimeUnit.MILLISECONDS);
+                if (item != null) {
+                    processIncoming(item, callback, sessionStartMs);
                 }
+                Throwable readerExc = readerFailure.get();
+                if (readerExc != null) {
+                    throw new IllegalStateException("读线程异常: " + readerExc.getMessage(), readerExc);
+                }
+                long nowNs = System.nanoTime();
                 if (nowNs - lastPingNs >= 20_000_000_000L) {
                     sendPingReq();
+                    flushSendBuffer();
                     lastPingNs = nowNs;
                 }
                 if (nowNs - lastMetricsNs >= 250_000_000L) {
@@ -134,8 +159,21 @@ final class MqttResponderRunner implements ProbeRunner {
             }
         } finally {
             running.set(false);
+            closeSocket();
+            if (readerThread != null) {
+                try {
+                    readerThread.join(500);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            drainIncomingQueue(callback, sessionStartMs);
             try {
                 sendDisconnect();
+            } catch (Exception ignored) {
+            }
+            try {
+                flushSendBuffer();
             } catch (Exception ignored) {
             }
             closeSocket();
@@ -151,6 +189,72 @@ final class MqttResponderRunner implements ProbeRunner {
             callback.onEvent(buildEndSummary(finalMetrics.received, sessionStartMs));
             executor.shutdown();
         }
+    }
+
+    /** 读线程：持续从 socket 拉包并入队，与回显处理并行。 */
+    private void readLoop() {
+        while (running.get()) {
+            try {
+                MqttPacket packet = readPacket();
+                if (packet == null) {
+                    continue;
+                }
+                if (packet.type != MQTT_PUBLISH) {
+                    continue;
+                }
+                byte[] payload = extractPayload(packet);
+                if (payload == null) {
+                    continue;
+                }
+                long recvNs = System.nanoTime();
+                receivedCount.incrementAndGet();
+                BlockingQueue<IncomingProbe> queue = incomingQueue;
+                if (queue == null) {
+                    continue;
+                }
+                queue.put(new IncomingProbe(payload, recvNs));
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception exc) {
+                if (running.get()) {
+                    readerFailure.compareAndSet(null, exc);
+                    running.set(false);
+                    closeSocket();
+                }
+                break;
+            }
+        }
+    }
+
+    private void drainIncomingQueue(ProbeCallback callback, long sessionStartMs) {
+        BlockingQueue<IncomingProbe> queue = incomingQueue;
+        if (queue == null) {
+            return;
+        }
+        IncomingProbe item;
+        while ((item = queue.poll()) != null) {
+            try {
+                processIncoming(item, callback, sessionStartMs);
+            } catch (Exception exc) {
+                Log.w(TAG, "drain incoming failed: " + exc.getMessage());
+            }
+        }
+    }
+
+    private void processIncoming(IncomingProbe item, ProbeCallback callback, long sessionStartMs) throws Exception {
+        long recvNs = item.recvNs;
+        long sendNs = System.nanoTime();
+        ProbePayloadCodec.EchoStampResult stamped = ProbePayloadCodec.stampEchoOnce(
+                item.payload, recvNs, sendNs);
+        if (!stamped.probePacket) {
+            return;
+        }
+        EchoStamp stamp = recordEchoIfNeeded(stamped);
+        sendPublishBuffered(publishTopic, stamped.payload);
+        int echoed = echoedCount.incrementAndGet();
+        logEchoStamp(stamp, recvNs, sendNs, sessionStartMs);
+        logEchoProgress(callback, receivedCount.get(), echoed, stamped.payload.length, sessionStartMs);
     }
 
     private static void logEchoProgress(ProbeCallback callback, int got, int echoed,
@@ -203,18 +307,64 @@ final class MqttResponderRunner implements ProbeRunner {
                 0, 0, 0, 0, 0, 0, 0, 0, 0, finalResult);
     }
 
-    /** 解析探测包 payload 的 runId+seq，记录去程到达（含重复标记）。非探测包静默跳过。 */
-    private void recordEcho(byte[] payload) {
-        try {
-            JSONObject obj = new JSONObject(new String(payload, StandardCharsets.UTF_8));
-            String runId = obj.optString("runId", "");
-            int seq = obj.optInt("seq", -1);
-            if (runId.isEmpty() || seq < 0) {
-                return;
+    private EchoStamp recordEchoIfNeeded(ProbePayloadCodec.EchoStampResult stamped) {
+        boolean duplicate = false;
+        if (recordEchoSeq) {
+            duplicate = !echoSeen.add(stamped.runId + "#" + stamped.seq);
+            long recvMs = System.currentTimeMillis();
+            echoLog.add(new EchoRecord(stamped.runId, stamped.seq, recvMs, duplicate));
+            if (shouldLogEchoRecv(stamped.seq)) {
+                Log.d(TAG, "echo recv seq=" + stamped.seq + " ts=" + recvMs + (duplicate ? " dup" : ""));
             }
-            boolean duplicate = !echoSeen.add(runId + "#" + seq);
-            echoLog.add(new EchoRecord(runId, seq, System.currentTimeMillis(), duplicate));
-        } catch (Exception ignored) {
+        }
+        return new EchoStamp(stamped.seq, stamped.clientSendNs, duplicate);
+    }
+
+    private static boolean shouldLogEchoRecv(int seq) {
+        return seq < DETAILED_LOG_MAX_COUNT || seq % MILESTONE_INTERVAL == 0;
+    }
+
+    /** 联调日志：回显处理耗时 + 相对探测端 clientSendNs 的去程到达延迟。 */
+    private static void logEchoStamp(EchoStamp stamp, long recvNs, long sendNs, long sessionStartMs) {
+        if (stamp.seq < 0) {
+            return;
+        }
+        long elapsedMs = Math.max(1, System.currentTimeMillis() - sessionStartMs);
+        boolean densePeriod = stamp.seq < DETAILED_LOG_MAX_COUNT || elapsedMs <= DETAILED_LOG_WINDOW_MS;
+        boolean milestone = stamp.seq % MILESTONE_INTERVAL == 0;
+        if (!densePeriod && !milestone) {
+            return;
+        }
+        double procUs = (sendNs - recvNs) / 1000.0;
+        String inbound = "n/a";
+        if (stamp.clientSendNs > 0) {
+            inbound = String.format(Locale.US, "%.1fms", (recvNs - stamp.clientSendNs) / 1_000_000.0);
+        }
+        Log.d(TAG, "echo stamp seq=" + stamp.seq
+                + " inbound=" + inbound
+                + " procUs=" + String.format(Locale.US, "%.1f", procUs)
+                + (stamp.duplicate ? " dup" : ""));
+    }
+
+    private static final class EchoStamp {
+        final int seq;
+        final long clientSendNs;
+        final boolean duplicate;
+
+        EchoStamp(int seq, long clientSendNs, boolean duplicate) {
+            this.seq = seq;
+            this.clientSendNs = clientSendNs;
+            this.duplicate = duplicate;
+        }
+    }
+
+    private static final class IncomingProbe {
+        final byte[] payload;
+        final long recvNs;
+
+        IncomingProbe(byte[] payload, long recvNs) {
+            this.payload = payload;
+            this.recvNs = recvNs;
         }
     }
 
@@ -275,7 +425,7 @@ final class MqttResponderRunner implements ProbeRunner {
         ByteArrayOutputStream body = new ByteArrayOutputStream();
         body.write(variable.toByteArray());
         body.write(payload.toByteArray());
-        sendPacket(0x10, body.toByteArray());
+        sendPacket(0x10, body.toByteArray(), true);
     }
 
     private void waitForConnack(int timeoutMs) throws Exception {
@@ -308,7 +458,7 @@ final class MqttResponderRunner implements ProbeRunner {
         body.write(id & 0xff);
         writeUtf(body, topic);
         body.write(0);
-        sendPacket((MQTT_SUBSCRIBE << 4) | 0x02, body.toByteArray());
+        sendPacket((MQTT_SUBSCRIBE << 4) | 0x02, body.toByteArray(), true);
     }
 
     private void waitForSuback(int timeoutMs) throws Exception {
@@ -325,19 +475,19 @@ final class MqttResponderRunner implements ProbeRunner {
         throw new IllegalStateException("等待 SUBACK 超时");
     }
 
-    private void sendPublish(String topic, byte[] payload) throws Exception {
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        writeUtf(body, topic);
-        body.write(payload);
-        sendPacket(MQTT_PUBLISH << 4, body.toByteArray());
+    private void sendPublishBuffered(String topic, byte[] payload) throws Exception {
+        publishBodyBuffer.reset();
+        writeUtf(publishBodyBuffer, topic);
+        publishBodyBuffer.write(payload);
+        sendPacket(MQTT_PUBLISH << 4, publishBodyBuffer.toByteArray(), false);
     }
 
     private void sendPingReq() throws Exception {
-        sendPacket(MQTT_PINGREQ << 4, new byte[0]);
+        sendPacket(MQTT_PINGREQ << 4, new byte[0], true);
     }
 
     private void sendDisconnect() throws Exception {
-        sendPacket(MQTT_DISCONNECT << 4, new byte[0]);
+        sendPacket(MQTT_DISCONNECT << 4, new byte[0], true);
     }
 
     private MqttPacket readPacket() throws Exception {
@@ -394,14 +544,27 @@ final class MqttResponderRunner implements ProbeRunner {
         }
     }
 
-    private void sendPacket(int header, byte[] body) throws Exception {
-        ByteArrayOutputStream packet = new ByteArrayOutputStream();
-        packet.write(header);
-        writeRemainingLength(packet, body.length);
-        packet.write(body);
+    private void sendPacket(int header, byte[] body, boolean forceFlush) throws Exception {
+        packetBuffer.reset();
+        packetBuffer.write(header);
+        writeRemainingLength(packetBuffer, body.length);
+        packetBuffer.write(body);
         synchronized (sendLock) {
-            output.write(packet.toByteArray());
-            output.flush();
+            output.write(packetBuffer.toByteArray());
+            sendsSinceFlush++;
+            if (forceFlush || sendsSinceFlush >= FLUSH_EVERY_N_SENDS) {
+                output.flush();
+                sendsSinceFlush = 0;
+            }
+        }
+    }
+
+    private void flushSendBuffer() throws Exception {
+        synchronized (sendLock) {
+            if (sendsSinceFlush > 0) {
+                output.flush();
+                sendsSinceFlush = 0;
+            }
         }
     }
 

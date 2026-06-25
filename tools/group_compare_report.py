@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""分组批次对比报告。
+"""分组对比报告。
 
 扫描一批 summary.json，按 (协议, 发包数档位, 弱网 Profile) 分组，
 组内对比 基线(未加速/弱网基线) 与 加速(云聚通加速/弱网加速) 的均值改善与判定。
-适配「先全弱网 -> 全加速 -> 全未加速」的分组批次采集（非 ABBA）。
+适配多场景 ABBA 采集或大批量归档后的横向汇总。
 
 用法：
     python tools/group_compare_report.py --dir <导出根目录>
@@ -64,6 +64,16 @@ def weak_net_line(data: dict[str, Any]) -> str:
     return "正常网" if not parts else "，".join(parts)
 
 
+def weak_net_setting(data: dict[str, Any]) -> dict[str, str]:
+    """提取 Clumsy 注入设定值（丢包% / 延迟ms / 抖动ms）。"""
+    wn = data.get("weakNetProfile") or {}
+    return {
+        "loss": str(wn.get("lossPercent", "") or ""),
+        "delay": str(wn.get("delayMs", "") or ""),
+        "jitter": str(wn.get("jitterMs", "") or ""),
+    }
+
+
 def tier(count: int) -> str:
     return "十万级" if count >= 50000 else "千级"
 
@@ -117,7 +127,7 @@ def build_report(runs: list[dict[str, Any]]) -> str:
         key = (r.get("protocol", "-"), tier(int(r.get("count", 0))), weak_net_line(r))
         groups.setdefault(key, {"base": [], "accel": []})[role].append(r)
 
-    lines: list[str] = ["# 分组批次对比报告", ""]
+    lines: list[str] = ["# 分组对比报告", ""]
     lines.append(f"共扫描 {len(runs)} 个 run，分为 {len(groups)} 组。")
     lines.append("")
 
@@ -143,6 +153,32 @@ def build_report(runs: list[dict[str, Any]]) -> str:
             improvements[key] = imp
             imp_str = f"{imp:+.1f}%" if imp is not None else "-"
             lines.append(f"| {label} | {b:.2f} | {a:.2f} | {imp_str} |")
+
+        setting = weak_net_setting((base_runs + accel_runs)[0])
+        if setting["loss"] or setting["delay"] or setting["jitter"]:
+            b_loss = avg([float(x.get("lossRate", 0)) for x in base_runs]) * 100
+            a_loss = avg([float(x.get("lossRate", 0)) for x in accel_runs]) * 100
+            b_jit = avg([float(x.get("jitterMs", 0)) for x in base_runs])
+            a_jit = avg([float(x.get("jitterMs", 0)) for x in accel_runs])
+            b_rtt = avg([float(x.get("avgRttMs", 0)) for x in base_runs])
+            a_rtt = avg([float(x.get("avgRttMs", 0)) for x in accel_runs])
+            set_loss = f"{setting['loss']}%" if setting["loss"] else "—"
+            set_jit = f"{setting['jitter']} ms" if setting["jitter"] else "—"
+            set_delay = f"+{setting['delay']} ms" if setting["delay"] else "—"
+            lines.append("")
+            lines.append("**弱网设定 vs 实测对照：**")
+            lines.append("")
+            lines.append("| 指标 | Clumsy 设定 | 基线实测 | 加速实测 | 基线→加速 |")
+            lines.append("| --- | --- | --- | --- | --- |")
+            lines.append(
+                f"| 丢包率 | {set_loss} | {b_loss:.2f}% | {a_loss:.2f}% | {a_loss - b_loss:+.2f} pp |"
+            )
+            lines.append(
+                f"| 抖动 | {set_jit} | {b_jit:.1f} ms | {a_jit:.1f} ms | {a_jit - b_jit:+.1f} ms |"
+            )
+            lines.append(
+                f"| 时延 (RTT 参考) | {set_delay} | {b_rtt:.0f} ms | {a_rtt:.0f} ms | {a_rtt - b_rtt:+.0f} ms |"
+            )
 
         lines.append("")
         lines.append(f"**Verdict: {verdict(improvements)}**")
