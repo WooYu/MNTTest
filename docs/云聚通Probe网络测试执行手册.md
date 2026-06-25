@@ -193,7 +193,7 @@ adb -s <回显端> logcat -s ProbeApp:D
 | ~~现场千级~~ | ~~1 000~~ | ~~10~~ | ~~200~~ | ~~5 000 ms~~ | — | 本次不执行 |
 
 - 参数页选 **实验室十万级** 一键填充；**R1/R2 正式 ABBA 全场景锁定** 100 000 / 2 000 / 100 B / 60 000 ms，勿为「好看」降 PPS。
-- 包大小 20～1400 B；主测 100 B 自动走紧凑格式（`{sendMs},{seq},AAA…`）；Autel 对标联调可手动 20 B，**不写入 R2 主结论**。
+- 包大小 1～2000 B（主测 100 B 自动走紧凑格式 `{sendMs},{seq},AAA…`）；速率 1～8000 PPS；发包数/速率/包大小/超时点击弹出数字输入框；端口可留空（UDP 9001 / TCP 9002 / MQTT 1883）。Autel 对标联调可手动 20 B，**不写入 R2 主结论**。
 - 须等测试 **自然结束**（sent 达到 Count）；放弃本轮用运行页「取消测试」，与「停止并查看结果」区分——后者会触发 `finalResult` 末段结算，已发未回包一次性计丢。
 - `summary.json` 含 `perf`（实际 PPS / 滞后）与 `recv`（收包停滞 / 是否早停 / `mqttConnectionLost`）；弱网激活时探测端会对在途包做背压（约 8s×PPS），连接被 Broker 重置时停止发包、跑满 Timeout 等待回显后正常结束，不再整轮 `onFailed`。
 - `perf.belowTarget=true` 时若 `received=sent` 且 RTT 正常仍可采信；`received/sent` < 95% 则记无效（弱网下 `recv.recvStallDetected` 仅告警时 **`publishStoppedEarly` 应为 false** 且 **`sent=Count`**）。

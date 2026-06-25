@@ -21,6 +21,7 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -57,6 +58,14 @@ public final class MainActivity extends Activity {
     private static final String DEFAULT_SIDE_CAR_HOST = "10.0.2.2";
     private static final String MQTT_TOKEN_FETCHING = "获取中…";
     private static final long MQTT_TOKEN_PREFETCH_DELAY_MS = 400L;
+    private static final int COUNT_MIN = 1;
+    private static final int COUNT_MAX = 200_000;
+    private static final int PPS_MIN = 1;
+    private static final int PPS_MAX = 8_000;
+    private static final int PACKET_BYTES_MIN = 1;
+    private static final int PACKET_BYTES_MAX = 2_000;
+    private static final int TIMEOUT_MS_MIN = 100;
+    private static final int TIMEOUT_MS_MAX = 300_000;
 
     private EditText hostInput;
     private Spinner hostSpinner;
@@ -438,9 +447,12 @@ public final class MainActivity extends Activity {
         if (configTargetChipView != null) {
             String h = selectedHost();
             String p = portInput != null ? portInput.getText().toString().trim() : "";
-            if (h.isEmpty() || p.isEmpty()) {
+            if (h.isEmpty()) {
                 configTargetChipView.setText("目标未填");
                 configTargetChipView.setTextColor(MUTED);
+            } else if (p.isEmpty()) {
+                configTargetChipView.setText(h + "（默认端口）");
+                configTargetChipView.setTextColor(Palette.SECTION_CONNECTION.accent);
             } else {
                 configTargetChipView.setText(h + ":" + p);
                 configTargetChipView.setTextColor(Palette.SECTION_CONNECTION.accent);
@@ -2106,7 +2118,7 @@ public final class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, fieldInputHeight()));
         hostSwitcher.addView(hostSpinner, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, fieldInputHeight()));
-        portInput = compactInput("9001");
+        portInput = compactInput("");
 
         LinearLayout row1 = new LinearLayout(this);
         row1.setOrientation(LinearLayout.HORIZONTAL);
@@ -2135,10 +2147,12 @@ public final class MainActivity extends Activity {
         LinearLayout card = sectionPanel(Palette.SECTION_PROBE, false);
         card.addView(sectionTitle("探测参数", "发包数量、速率与超时", Palette.SECTION_PROBE));
 
-        countInput = compactInput(ProbeDefaults.COUNT);
-        ppsInput = compactInput(ProbeDefaults.PPS);
-        packetBytesInput = compactInput(ProbeDefaults.PACKET_BYTES);
-        timeoutInput = compactInput(ProbeDefaults.TIMEOUT_MS);
+        countInput = compactNumericInput(ProbeDefaults.COUNT, "发包数", COUNT_MIN, COUNT_MAX);
+        ppsInput = compactNumericInput(ProbeDefaults.PPS, "速率(包/秒)", PPS_MIN, PPS_MAX);
+        packetBytesInput = compactNumericInput(ProbeDefaults.PACKET_BYTES, "包大小(字节)",
+                PACKET_BYTES_MIN, PACKET_BYTES_MAX);
+        timeoutInput = compactNumericInput(ProbeDefaults.TIMEOUT_MS, "超时(ms)",
+                TIMEOUT_MS_MIN, TIMEOUT_MS_MAX);
 
         card.addView(presetSwitchRow());
 
@@ -2967,11 +2981,11 @@ public final class MainActivity extends Activity {
             lastConfig = new ProbeConfig(
                     protocol,
                     selectedHost(),
-                    parseInt(portInput, "端口", 1, 65535),
-                    parseInt(countInput, "发包数量", 1, 200000),
-                    parseInt(ppsInput, "每秒发包数", 1, 2000),
-                    parseInt(packetBytesInput, "数据包大小", ProbePayloadCodec.MIN_PACKET_BYTES, 1400),
-                    parseInt(timeoutInput, "超时时间", 100, 300000),
+                    parsePort(protocol),
+                    parseInt(countInput, "发包数量", COUNT_MIN, COUNT_MAX),
+                    parseInt(ppsInput, "每秒发包数", PPS_MIN, PPS_MAX),
+                    parseInt(packetBytesInput, "数据包大小", PACKET_BYTES_MIN, PACKET_BYTES_MAX),
+                    parseInt(timeoutInput, "超时时间", TIMEOUT_MS_MIN, TIMEOUT_MS_MAX),
                     modeSpinner.getSelectedItem().toString(),
                     UUID.randomUUID().toString().replace("-", "").substring(0, 12),
                     vpnActive,
@@ -3588,6 +3602,59 @@ public final class MainActivity extends Activity {
         return input;
     }
 
+    /** 探测参数：点击弹出数字输入框，避免平板软键盘遮挡表单。 */
+    private EditText compactNumericInput(String value, String fieldName, int min, int max) {
+        EditText input = compactInput(value);
+        input.setFocusable(false);
+        input.setFocusableInTouchMode(false);
+        input.setCursorVisible(false);
+        input.setKeyListener(null);
+        input.setOnClickListener(v -> showNumericInputDialog(input, fieldName, min, max));
+        return input;
+    }
+
+    private void showNumericInputDialog(EditText target, String fieldName, int min, int max) {
+        EditText editor = new EditText(this);
+        editor.setInputType(InputType.TYPE_CLASS_NUMBER);
+        editor.setText(target.getText().toString());
+        editor.setSelection(editor.getText().length());
+        editor.setSelectAllOnFocus(true);
+        editor.setSingleLine(true);
+        int pad = dp(16);
+        editor.setPadding(pad, dp(8), pad, dp(8));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(fieldName)
+                .setMessage("请输入 " + min + "–" + max + " 范围内的整数")
+                .setView(editor)
+                .setPositiveButton("确定", null)
+                .setNegativeButton("取消", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                try {
+                    int value = Integer.parseInt(editor.getText().toString().trim());
+                    if (value < min || value > max) {
+                        throw new NumberFormatException();
+                    }
+                    target.setText(String.valueOf(value));
+                    target.setError(null);
+                    refreshPresetToggle();
+                    dialog.dismiss();
+                } catch (NumberFormatException error) {
+                    Toast.makeText(this, fieldName + "请输入 " + min + "–" + max + " 范围内的整数",
+                            Toast.LENGTH_SHORT).show();
+                }
+            });
+            editor.requestFocus();
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT);
+            }
+        });
+        dialog.show();
+    }
+
     /** 参数页标题旁次级入口：轻量文字链，权重低于主操作。 */
     private TextView headerTextLink(String label) {
         TextView link = text(label, 12, Palette.LINK, Typeface.NORMAL);
@@ -3746,9 +3813,32 @@ public final class MainActivity extends Activity {
         } catch (NumberFormatException error) {
             String message = fieldName + "请输入 " + min + "–" + max + " 范围内的整数";
             input.setError(message);
-            input.requestFocus();
+            if (input.isFocusable()) {
+                input.requestFocus();
+            } else {
+                input.performClick();
+            }
             throw new IllegalArgumentException(message);
         }
+    }
+
+    private int parsePort(ProbeConfig.Protocol protocol) {
+        String raw = portInput.getText().toString().trim();
+        if (raw.isEmpty()) {
+            portInput.setError(null);
+            return defaultPortFor(protocol);
+        }
+        return parseInt(portInput, "端口", 1, 65535);
+    }
+
+    private int defaultPortFor(ProbeConfig.Protocol protocol) {
+        if (protocol == ProbeConfig.Protocol.TCP) {
+            return 9002;
+        }
+        if (protocol == ProbeConfig.Protocol.MQTT) {
+            return Integer.parseInt(MqttRelayServerCatalog.PORT);
+        }
+        return 9001;
     }
 
     private void setButtons(boolean running) {
@@ -4049,28 +4139,21 @@ public final class MainActivity extends Activity {
         if (hostSpinner != null) {
             hostSpinner.setVisibility(mqtt ? View.VISIBLE : View.GONE);
         }
-        if (mqtt) {
-            portInput.setText(MqttRelayServerCatalog.PORT);
-            portInput.setEnabled(false);
-            portInput.setFocusable(false);
-        } else {
-            portInput.setEnabled(true);
-            portInput.setFocusable(true);
-            portInput.setFocusableInTouchMode(true);
-            if (portInput.getText().toString().trim().isEmpty()
-                    || portInput.getText().toString().trim().equals("9001")
-                    || portInput.getText().toString().trim().equals("9002")
-                    || portInput.getText().toString().trim().equals(MqttRelayServerCatalog.PORT)) {
-                if (protocol == ProbeConfig.Protocol.UDP) {
-                    portInput.setText("9001");
-                } else {
-                    portInput.setText("9002");
-                }
-            }
+        portInput.setEnabled(true);
+        portInput.setFocusable(true);
+        portInput.setFocusableInTouchMode(true);
+        if (!mqtt) {
             String host = hostInput.getText().toString().trim();
             if (host.isEmpty() || MqttRelayServerCatalog.isKnownHost(host)) {
                 hostInput.setText(DEFAULT_SIDE_CAR_HOST);
             }
+        }
+        if (protocol == ProbeConfig.Protocol.MQTT) {
+            portInput.setHint("默认 " + MqttRelayServerCatalog.PORT);
+        } else if (protocol == ProbeConfig.Protocol.TCP) {
+            portInput.setHint("默认 9002");
+        } else {
+            portInput.setHint("默认 9001");
         }
         refreshHostSubtitle();
         if (protocol == ProbeConfig.Protocol.MQTT) {
@@ -4280,8 +4363,7 @@ public final class MainActivity extends Activity {
         String savedHost = prefs.getString("host", protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX
                 ? MqttDefaultProfile.HOST : DEFAULT_SIDE_CAR_HOST);
         setSelectedHost(savedHost);
-        portInput.setText(prefs.getString("port", protocolIndex == 1 ? "9002"
-                : protocolIndex == MqttDefaultProfile.PROTOCOL_INDEX ? MqttRelayServerCatalog.PORT : "9001"));
+        portInput.setText(prefs.getString("port", ""));
         countInput.setText(prefs.getString("count", ProbeDefaults.COUNT));
         ppsInput.setText(prefs.getString("pps", ProbeDefaults.PPS));
         packetBytesInput.setText(prefs.getString("packetBytes", ProbeDefaults.PACKET_BYTES));

@@ -714,23 +714,38 @@ final class ProbeStorage {
         byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
         List<Uri> existing = findAllDownloadUris(context, runBaseOrNull, displayName);
         if (!existing.isEmpty()) {
-            Uri primary = existing.get(0);
-            try (OutputStream os = context.getContentResolver().openOutputStream(primary, "wt")) {
-                if (os == null) {
-                    throw new IllegalStateException("无法打开输出流: " + displayName);
-                }
-                os.write(bytes);
+            writeBytesToDownloadUris(context, existing, bytes, displayName);
+            return;
+        }
+        File onDisk = directFileFor(runBaseOrNull, displayName);
+        if (onDisk.isFile()) {
+            existing = findAllDownloadUrisLoose(context, runBaseOrNull, displayName);
+            if (!existing.isEmpty()) {
+                writeBytesToDownloadUris(context, existing, bytes, displayName);
+                return;
             }
-            for (int i = 1; i < existing.size(); i++) {
-                context.getContentResolver().delete(existing.get(i), null, null);
-            }
+            writeViaDirectFile(runBaseOrNull, displayName, content);
             return;
         }
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
         values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
         values.put(MediaStore.Downloads.RELATIVE_PATH, downloadsRelativePath(runBaseOrNull));
-        Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        Uri uri;
+        try {
+            uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        } catch (Exception insertError) {
+            if (!isMediaStoreUniqueConflict(insertError)) {
+                throw insertError;
+            }
+            existing = findAllDownloadUrisLoose(context, runBaseOrNull, displayName);
+            if (!existing.isEmpty()) {
+                writeBytesToDownloadUris(context, existing, bytes, displayName);
+                return;
+            }
+            writeViaDirectFile(runBaseOrNull, displayName, content);
+            return;
+        }
         if (uri == null) {
             writeViaDirectFile(runBaseOrNull, displayName, content);
             return;
@@ -741,6 +756,43 @@ final class ProbeStorage {
             }
             os.write(bytes);
         }
+    }
+
+    private static void writeBytesToDownloadUris(
+            Context context,
+            List<Uri> uris,
+            byte[] bytes,
+            String displayName
+    ) throws Exception {
+        Uri primary = uris.get(0);
+        try (OutputStream os = context.getContentResolver().openOutputStream(primary, "wt")) {
+            if (os == null) {
+                throw new IllegalStateException("无法打开输出流: " + displayName);
+            }
+            os.write(bytes);
+        }
+        for (int i = 1; i < uris.size(); i++) {
+            context.getContentResolver().delete(uris.get(i), null, null);
+        }
+    }
+
+    private static boolean isMediaStoreUniqueConflict(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            String message = current.getMessage();
+            if (message != null
+                    && (message.contains("UNIQUE constraint")
+                    || message.contains("SQLITE_CONSTRAINT_UNIQUE")
+                    || message.contains("2067"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static File directFileFor(String runBaseOrNull, String displayName) {
+        return runBaseOrNull == null || runBaseOrNull.isEmpty()
+                ? new File(downloadsRoot(), displayName)
+                : new File(runFolder(runBaseOrNull), displayName);
     }
 
     private static void writeViaDirectFile(String runBaseOrNull, String displayName, String content) throws Exception {
@@ -759,14 +811,16 @@ final class ProbeStorage {
     private static String readDownloadText(Context context, String runBaseOrNull, String displayName) throws Exception {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             Uri uri = findDownloadUri(context, runBaseOrNull, displayName);
-            if (uri == null) {
-                return null;
+            if (uri != null) {
+                return readStreamToText(context.getContentResolver().openInputStream(uri));
             }
-            return readStreamToText(context.getContentResolver().openInputStream(uri));
+            File file = directFileFor(runBaseOrNull, displayName);
+            if (file.isFile()) {
+                return readTextFile(file);
+            }
+            return null;
         }
-        File file = runBaseOrNull == null || runBaseOrNull.isEmpty()
-                ? new File(downloadsRoot(), displayName)
-                : new File(runFolder(runBaseOrNull), displayName);
+        File file = directFileFor(runBaseOrNull, displayName);
         if (!file.isFile()) {
             return null;
         }
@@ -790,15 +844,49 @@ final class ProbeStorage {
 
     private static Uri findDownloadUri(Context context, String runBaseOrNull, String displayName) {
         List<Uri> all = findAllDownloadUris(context, runBaseOrNull, displayName);
+        if (!all.isEmpty()) {
+            return all.get(0);
+        }
+        all = findAllDownloadUrisLoose(context, runBaseOrNull, displayName);
         return all.isEmpty() ? null : all.get(0);
     }
 
     private static List<Uri> findAllDownloadUris(Context context, String runBaseOrNull, String displayName) {
         List<Uri> result = new ArrayList<>();
+        for (String relativePath : downloadsRelativePathVariants(runBaseOrNull)) {
+            appendDownloadUris(context, result, displayName, relativePath, false);
+            if (!result.isEmpty()) {
+                return result;
+            }
+        }
+        return result;
+    }
+
+    /** 兼容 RELATIVE_PATH 尾斜杠差异或 MediaStore 与磁盘不同步时的宽松查找。 */
+    private static List<Uri> findAllDownloadUrisLoose(Context context, String runBaseOrNull, String displayName) {
+        List<Uri> exact = findAllDownloadUris(context, runBaseOrNull, displayName);
+        if (!exact.isEmpty()) {
+            return exact;
+        }
+        List<Uri> result = new ArrayList<>();
+        String likePrefix = downloadsRelativePathLikePrefix(runBaseOrNull);
+        appendDownloadUris(context, result, displayName, likePrefix, true);
+        return result;
+    }
+
+    private static void appendDownloadUris(
+            Context context,
+            List<Uri> result,
+            String displayName,
+            String relativePath,
+            boolean likePath
+    ) {
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
-        String relativePath = downloadsRelativePath(runBaseOrNull);
         String[] projection = {MediaStore.Downloads._ID};
-        String selection = MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + "=?";
+        String pathClause = likePath
+                ? MediaStore.Downloads.RELATIVE_PATH + " LIKE ?"
+                : MediaStore.Downloads.RELATIVE_PATH + "=?";
+        String selection = MediaStore.Downloads.DISPLAY_NAME + "=? AND " + pathClause;
         String[] args = {displayName, relativePath};
         try (Cursor cursor = context.getContentResolver().query(collection, projection, selection, args, null)) {
             if (cursor != null) {
@@ -808,7 +896,25 @@ final class ProbeStorage {
                 }
             }
         }
-        return result;
+    }
+
+    private static List<String> downloadsRelativePathVariants(String runBaseOrNull) {
+        List<String> variants = new ArrayList<>();
+        String withSlash = downloadsRelativePath(runBaseOrNull);
+        variants.add(withSlash);
+        if (withSlash.endsWith("/")) {
+            variants.add(withSlash.substring(0, withSlash.length() - 1));
+        } else {
+            variants.add(withSlash + "/");
+        }
+        return variants;
+    }
+
+    private static String downloadsRelativePathLikePrefix(String runBaseOrNull) {
+        if (runBaseOrNull == null || runBaseOrNull.isEmpty()) {
+            return Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOADS_SUBDIR + "/%";
+        }
+        return Environment.DIRECTORY_DOWNLOADS + "/" + DOWNLOADS_SUBDIR + "/" + runBaseOrNull + "%";
     }
 
     private static String downloadsRelativePath(String runBaseOrNull) {
