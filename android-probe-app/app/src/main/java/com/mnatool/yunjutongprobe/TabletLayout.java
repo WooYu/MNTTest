@@ -103,12 +103,38 @@ final class TabletLayout {
         return pick(tier, 11, 12, 13);
     }
 
+    static int stepCompactLabelSp(Tier tier) {
+        return pick(tier, 11, 11, 12);
+    }
+
     static int heroAccentHeightDp(Tier tier) {
         return pick(tier, 48, 56, 64);
     }
 
     static int stepBarPaddingHDp(Tier tier) {
         return pick(tier, 14, 24, 32);
+    }
+
+    static int stepBarCompactPaddingHDp(Tier tier) {
+        return pick(tier, 12, 16, 20);
+    }
+
+    static int stepBadgeSizeDp(Tier tier) {
+        return pick(tier, 32, 36, 40);
+    }
+
+    static int stepBadgeMarginDp(Tier tier) {
+        return pick(tier, 10, 12, 14);
+    }
+
+    /** 步骤徽章右下角 + 安全间距，供左缘内容避让（dp）。 */
+    static int stepBadgeContentInsetDp(Tier tier) {
+        return stepBadgeSizeDp(tier) + stepBadgeMarginDp(tier) + pick(tier, 4, 6, 8);
+    }
+
+    /** 页面内容顶部为左上角步骤徽章预留的间距（dp）。 */
+    static int stepBadgeClearanceDp(Tier tier) {
+        return pick(tier, 4, 6, 8);
     }
 
     static int pageSubtitleBottomDp(Tier tier) {
@@ -219,12 +245,42 @@ final class TabletLayout {
         return pick(tier, 56, 64, 72);
     }
 
+    static int monitorPagePaddingVDp(Tier tier) {
+        return pick(tier, 10, 12, 14);
+    }
+
+    static int monitorSectionGapDp(Tier tier) {
+        return pick(tier, 10, 14, 16);
+    }
+
+    static int monitorMetricCardHeightDp(Tier tier) {
+        return pick(tier, 64, 68, 72);
+    }
+
+    static int monitorLossStripHeightDp(Tier tier) {
+        return 44;
+    }
+
+    /** 宽屏单屏运行页：事件日志压缩高度（探测端默认收起，回显端保留）。 */
+    static int monitorEventLogHeightDp(Tier tier) {
+        return pick(tier, 100, 120, 140);
+    }
+
+    static int monitorPrimaryButtonHeightDp(Tier tier) {
+        return pick(tier, 50, 54, 58);
+    }
+
     static int rttChartHeightDp(Tier tier) {
-        return pick(tier, 114, 168, 240);
+        return pick(tier, 148, 200, 268);
     }
 
     static int packetRecordHeightDp(Tier tier) {
         return pick(tier, 190, 240, 340);
+    }
+
+    /** 宽屏运行页：逐包记录滚动区与左侧 RTT 图 + 丢包条内容区等高。 */
+    static int monitorChartsColumnBodyHeightDp(Tier tier) {
+        return rttChartHeightDp(tier) + sectionGapDp(tier);
     }
 
     static int eventLogHeightDp(Tier tier) {

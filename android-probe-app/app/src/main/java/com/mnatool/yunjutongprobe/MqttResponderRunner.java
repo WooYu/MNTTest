@@ -346,7 +346,7 @@ final class MqttResponderRunner implements ProbeRunner {
                 stamp.clientSendNs, stamp.clientSendMs, recvNs, recvMs);
         Log.d(TAG, "echo stamp seq=" + stamp.seq
                 + " inbound=" + inbound
-                + " procUs=" + String.format(Locale.US, "%.1f", procUs)
+                + " procUs=" + String.format(Locale.US, "%.1fus", procUs)
                 + (stamp.duplicate ? " dup" : ""));
     }
 

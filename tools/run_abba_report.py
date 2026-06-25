@@ -199,12 +199,14 @@ def build_report(
     b_loss = avg([float(r.get("lossRate", 0)) for r in b_runs]) * 100
     a_p95 = avg([float(r.get("p95RttMs", 0)) for r in a_runs])
     b_p95 = avg([float(r.get("p95RttMs", 0)) for r in b_runs])
+    loss_imp_s = f"{loss_imp:+.1f}%" if loss_imp is not None else "N/A(基线为0)"
+    p95_imp_s = f"{p95_imp:+.1f}%" if p95_imp is not None else "-"
     lines.append(
         f"{scene} / {proto} / 弱网:{wn}："
         f"加速组相对基线，丢包率 {a_loss:.2f}% → {b_loss:.2f}%"
-        f"（改善 {loss_imp:+.1f}%），"
+        f"（改善 {loss_imp_s}），"
         f"p95 {a_p95:.0f}ms → {b_p95:.0f}ms"
-        f"（改善 {p95_imp:+.1f}%）。"
+        f"（改善 {p95_imp_s}）。"
         f"Verdict: {v}。"
     )
     lines.append("```")

@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,6 +28,9 @@ final class MqttProbeRunner implements ProbeRunner {
     private static final int MQTT_SUBACK = 9;
     private static final int MQTT_PINGREQ = 12;
     private static final int MQTT_DISCONNECT = 14;
+    /** 弱网下单连接允许的在途包上限（约 8s × PPS），避免 Broker/TCP 积压过载断连。 */
+    private static final int WEAK_NET_IN_FLIGHT_SECONDS = 8;
+    private static final long PING_INTERVAL_NS = 10_000_000_000L;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -38,6 +42,7 @@ final class MqttProbeRunner implements ProbeRunner {
     private volatile OutputStream output;
     private volatile int packetId = 1;
     private volatile ProbeRecvStats activeRecvStats;
+    private volatile boolean mqttConnectionLost;
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -48,6 +53,7 @@ final class MqttProbeRunner implements ProbeRunner {
         samples.clear();
         highestReceivedSeq.set(-1);
         activeRecvStats = null;
+        mqttConnectionLost = false;
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -94,11 +100,16 @@ final class MqttProbeRunner implements ProbeRunner {
             long lastMetricsNs = 0;
             long lastPingNs = System.nanoTime();
             ProbePerfStats perf = new ProbePerfStats(config.pps);
-            ProbeRecvStats recvStats = new ProbeRecvStats();
+            ProbeRecvStats recvStats = ProbeRecvStats.forConfig(config);
             activeRecvStats = recvStats;
             Log.i(TAG, "probe loop: count=" + config.count + " pps=" + config.pps + " topic=" + config.mqttPublishTopic);
             int sentSeq = 0;
+            int inFlightCap = inFlightCapFor(config);
             for (sentSeq = 0; sentSeq < config.count && running.get(); sentSeq++) {
+                waitForInFlightRoom(sentSeq, inFlightCap, recvStats, timeoutNs, callback);
+                if (mqttConnectionLost) {
+                    break;
+                }
                 long nowNs = System.nanoTime();
                 nextNs = ProbeSendScheduler.capCatchUp(nowNs, nextNs, intervalNs, recvStats);
                 if (nowNs < nextNs) {
@@ -126,7 +137,14 @@ final class MqttProbeRunner implements ProbeRunner {
                         compactPayload
                 );
                 samples.put(sentSeq, sample);
-                sendPublish(config.mqttPublishTopic, payload);
+                try {
+                    sendPublish(config.mqttPublishTopic, payload);
+                } catch (Exception exc) {
+                    if (handleConnectionIoFailure(exc, sentSeq, recvStats, callback)) {
+                        break;
+                    }
+                    throw exc;
+                }
                 perf.afterSend();
                 if (sentSeq % 50 == 0) {
                     Log.d(TAG, "publish seq=" + sentSeq + "/" + config.count
@@ -136,8 +154,15 @@ final class MqttProbeRunner implements ProbeRunner {
 
                 long metricsNow = System.nanoTime();
                 recvStats.checkStall(metricsNow, true, sentSeq, callback);
-                if (metricsNow - lastPingNs >= 20_000_000_000L) {
-                    sendPingReq();
+                if (metricsNow - lastPingNs >= PING_INTERVAL_NS) {
+                    try {
+                        sendPingReq();
+                    } catch (Exception exc) {
+                        if (handleConnectionIoFailure(exc, sentSeq, recvStats, callback)) {
+                            break;
+                        }
+                        throw exc;
+                    }
                     lastPingNs = metricsNow;
                 }
                 if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
@@ -163,7 +188,7 @@ final class MqttProbeRunner implements ProbeRunner {
                 sleepNs(100_000_000L);
             }
         } catch (Exception exc) {
-            if (running.get()) {
+            if (running.get() && !mqttConnectionLost) {
                 failure = exc;
                 Log.e(TAG, "runInternal exception: " + exc.getClass().getSimpleName() + " " + exc.getMessage(), exc);
                 callback.onEvent("MQTT 失败: [" + exc.getClass().getSimpleName() + "] " + exc.getMessage());
@@ -171,7 +196,9 @@ final class MqttProbeRunner implements ProbeRunner {
         } finally {
             running.set(false);
             try {
-                sendDisconnect();
+                if (!mqttConnectionLost) {
+                    sendDisconnect();
+                }
             } catch (Exception ignored) {
             }
             closeSocket();
@@ -225,7 +252,7 @@ final class MqttProbeRunner implements ProbeRunner {
         }
         variable.write(flags);
         variable.write(0);
-        variable.write(60);
+        variable.write(120);
 
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         writeUtf(payload, config.mqttClientId);
@@ -318,7 +345,7 @@ final class MqttProbeRunner implements ProbeRunner {
                     handlePublish(packet, config);
                 }
             } catch (Exception exc) {
-                if (running.get()) {
+                if (running.get() && !handleConnectionIoFailure(exc, -1, activeRecvStats, callback)) {
                     callback.onEvent("MQTT 接收异常: " + exc.getMessage());
                 }
             }
@@ -363,6 +390,64 @@ final class MqttProbeRunner implements ProbeRunner {
         int previousHigh = highestReceivedSeq.getAndUpdate(old -> Math.max(old, seq));
         sample.reordered = previousHigh > seq;
         recvStatsOnAdvance(seq, sample.clientRecvNs);
+    }
+
+    private void waitForInFlightRoom(int sentSeq, int inFlightCap, ProbeRecvStats recvStats,
+            long timeoutNs, ProbeCallback callback) throws Exception {
+        if (inFlightCap == Integer.MAX_VALUE) {
+            return;
+        }
+        while (running.get() && !mqttConnectionLost) {
+            int inFlight = sentSeq - recvStats.lastRecvSeq();
+            if (inFlight <= inFlightCap) {
+                return;
+            }
+            recvStats.recordInFlightThrottle();
+            recvStats.checkStall(System.nanoTime(), true, sentSeq, callback);
+            callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
+            sleepNs(50_000_000L);
+        }
+    }
+
+    private static int inFlightCapFor(ProbeConfig config) {
+        if (config != null && config.weakNetProfile.isActive()) {
+            return Math.max(1000, config.pps * WEAK_NET_IN_FLIGHT_SECONDS);
+        }
+        return Integer.MAX_VALUE;
+    }
+
+    private boolean handleConnectionIoFailure(Exception exc, int sentSeq,
+            ProbeRecvStats recvStats, ProbeCallback callback) {
+        if (!isConnectionIoError(exc)) {
+            return false;
+        }
+        if (!mqttConnectionLost) {
+            mqttConnectionLost = true;
+            if (recvStats != null) {
+                recvStats.markConnectionLost(Math.max(0, sentSeq));
+            }
+            Log.w(TAG, "mqtt connection lost"
+                    + (sentSeq >= 0 ? " at sentSeq=" + sentSeq : "")
+                    + ": " + exc.getMessage());
+            callback.onEvent("MQTT 连接中断（" + exc.getMessage() + "），停止发包并等待已发包回显");
+        }
+        return true;
+    }
+
+    private static boolean isConnectionIoError(Throwable exc) {
+        while (exc != null) {
+            if (exc instanceof SocketException && !(exc instanceof java.net.SocketTimeoutException)) {
+                return true;
+            }
+            if (exc instanceof IllegalStateException) {
+                String message = exc.getMessage();
+                if (message != null && message.toLowerCase(Locale.US).contains("closed")) {
+                    return true;
+                }
+            }
+            exc = exc.getCause();
+        }
+        return false;
     }
 
     private void recvStatsOnAdvance(int seq, long nowNs) {

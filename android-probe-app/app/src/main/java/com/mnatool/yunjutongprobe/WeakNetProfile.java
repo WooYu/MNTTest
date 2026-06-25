@@ -7,6 +7,7 @@ import org.json.JSONObject;
 /** Clumsy / tc 等弱网模拟参数，写入 Summary 便于 A/B 对比时核对 Profile 是否一致。 */
 final class WeakNetProfile {
     static final String[] TOOL_OPTIONS = {"无", "Clumsy", "tc", "其他"};
+    static final String DEFAULT_TOOL = "Clumsy";
 
     final String tool;
     final String lossPercent;
@@ -26,9 +27,13 @@ final class WeakNetProfile {
         return new WeakNetProfile("无", "", "", "", "");
     }
 
+    static WeakNetProfile defaults() {
+        return new WeakNetProfile(DEFAULT_TOOL, "", "", "", "");
+    }
+
     static WeakNetProfile fromPreferences(SharedPreferences prefs) {
         return new WeakNetProfile(
-                prefs.getString("weakNetTool", "无"),
+                prefs.getString("weakNetTool", DEFAULT_TOOL),
                 prefs.getString("weakNetLossPercent", ""),
                 prefs.getString("weakNetDelayMs", ""),
                 prefs.getString("weakNetJitterMs", ""),

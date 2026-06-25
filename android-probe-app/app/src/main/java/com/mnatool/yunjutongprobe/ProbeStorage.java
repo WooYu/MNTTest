@@ -600,7 +600,30 @@ final class ProbeStorage {
     }
 
     private static void saveIndex(Context context, JSONObject index) throws Exception {
+        cleanupIndexDuplicates(context);
         writeDownloadFile(context, null, INDEX_FILE, "application/json", index.toString(2));
+    }
+
+    /** 清理 MediaStore 重复 insert 产生的 index (N).json，避免下次 save 再次冲突。 */
+    private static void cleanupIndexDuplicates(Context context) {
+        File root = downloadsRoot();
+        if (!root.isDirectory()) {
+            return;
+        }
+        File[] orphans = root.listFiles((dir, name) ->
+                name.startsWith("index") && name.endsWith(".json") && !INDEX_FILE.equals(name));
+        if (orphans == null) {
+            return;
+        }
+        for (File orphan : orphans) {
+            orphan.delete();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    deleteDownloadFile(context, null, orphan.getName());
+                } catch (Exception ignored) {
+                }
+            }
+        }
     }
 
     private static void addIndexEntry(Context context, JSONObject entry) throws Exception {
@@ -688,9 +711,20 @@ final class ProbeStorage {
             String mimeType,
             String content
     ) throws Exception {
-        Uri existing = findDownloadUri(context, runBaseOrNull, displayName);
-        if (existing != null) {
-            context.getContentResolver().delete(existing, null, null);
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        List<Uri> existing = findAllDownloadUris(context, runBaseOrNull, displayName);
+        if (!existing.isEmpty()) {
+            Uri primary = existing.get(0);
+            try (OutputStream os = context.getContentResolver().openOutputStream(primary, "wt")) {
+                if (os == null) {
+                    throw new IllegalStateException("无法打开输出流: " + displayName);
+                }
+                os.write(bytes);
+            }
+            for (int i = 1; i < existing.size(); i++) {
+                context.getContentResolver().delete(existing.get(i), null, null);
+            }
+            return;
         }
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, displayName);
@@ -698,13 +732,27 @@ final class ProbeStorage {
         values.put(MediaStore.Downloads.RELATIVE_PATH, downloadsRelativePath(runBaseOrNull));
         Uri uri = context.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
         if (uri == null) {
-            throw new IllegalStateException("无法写入 " + downloadsRelativePath(runBaseOrNull) + displayName);
+            writeViaDirectFile(runBaseOrNull, displayName, content);
+            return;
         }
         try (OutputStream os = context.getContentResolver().openOutputStream(uri)) {
             if (os == null) {
                 throw new IllegalStateException("无法打开输出流: " + displayName);
             }
-            os.write(content.getBytes(StandardCharsets.UTF_8));
+            os.write(bytes);
+        }
+    }
+
+    private static void writeViaDirectFile(String runBaseOrNull, String displayName, String content) throws Exception {
+        File file = runBaseOrNull == null || runBaseOrNull.isEmpty()
+                ? new File(downloadsRoot(), displayName)
+                : new File(runFolder(runBaseOrNull), displayName);
+        File parent = file.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("无法创建目录: " + parent.getAbsolutePath());
+        }
+        try (FileWriter writer = new FileWriter(file)) {
+            writer.write(content);
         }
     }
 
@@ -741,18 +789,26 @@ final class ProbeStorage {
     }
 
     private static Uri findDownloadUri(Context context, String runBaseOrNull, String displayName) {
+        List<Uri> all = findAllDownloadUris(context, runBaseOrNull, displayName);
+        return all.isEmpty() ? null : all.get(0);
+    }
+
+    private static List<Uri> findAllDownloadUris(Context context, String runBaseOrNull, String displayName) {
+        List<Uri> result = new ArrayList<>();
         Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
         String relativePath = downloadsRelativePath(runBaseOrNull);
         String[] projection = {MediaStore.Downloads._ID};
         String selection = MediaStore.Downloads.DISPLAY_NAME + "=? AND " + MediaStore.Downloads.RELATIVE_PATH + "=?";
         String[] args = {displayName, relativePath};
         try (Cursor cursor = context.getContentResolver().query(collection, projection, selection, args, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                long id = cursor.getLong(0);
-                return ContentUris.withAppendedId(collection, id);
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    long id = cursor.getLong(0);
+                    result.add(ContentUris.withAppendedId(collection, id));
+                }
             }
         }
-        return null;
+        return result;
     }
 
     private static String downloadsRelativePath(String runBaseOrNull) {

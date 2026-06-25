@@ -47,12 +47,17 @@ final class MetricsCalculator {
                 if (sample.reordered) {
                     reordered++;
                 }
-            } else if (finalResult) {
-                // 只在最终结算时把未收包计为丢包。运行中不按单包超时计丢，避免发包时长接近/超过
-                // timeout 时实时丢包率虚高；运行中的超时包仍由图表丢包柱（按 timeout 独立判定）实时呈现。
-                lost++;
-                burst++;
-                maxBurst = Math.max(maxBurst, burst);
+            } else {
+                boolean expired = finalResult || nowNs - sample.clientSendNs > timeoutNs;
+                if (expired) {
+                    // 运行中：仅统计已超过 timeout 的未收包（与图表底栏一致）；在途包不计，避免虚高。
+                    // 最终结算：所有未收包计为丢包。
+                    lost++;
+                    burst++;
+                    maxBurst = Math.max(maxBurst, burst);
+                } else {
+                    burst = 0;
+                }
             }
         }
 

@@ -62,7 +62,7 @@ final class TcpProbeRunner implements ProbeRunner {
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             ProbePerfStats perf = new ProbePerfStats(config.pps);
-            ProbeRecvStats recvStats = new ProbeRecvStats();
+            ProbeRecvStats recvStats = ProbeRecvStats.forConfig(config);
             activeRecvStats = recvStats;
             int sentSeq = 0;
             for (sentSeq = 0; sentSeq < config.count && running.get(); sentSeq++) {

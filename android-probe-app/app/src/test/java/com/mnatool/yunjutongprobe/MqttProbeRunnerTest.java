@@ -172,7 +172,7 @@ public class MqttProbeRunnerTest {
 
                         int keepAlive = ((body[off[0]] & 0xff) << 8) | (body[off[0] + 1] & 0xff);
                         off[0] += 2;
-                        assertEquals("KeepAlive 应为 60s", 60, keepAlive);
+                        assertEquals("KeepAlive 应为 120s", 120, keepAlive);
 
                         String clientId = readUtf(body, off);
                         String username = readUtf(body, off);

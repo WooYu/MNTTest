@@ -20,10 +20,20 @@ dist/
 *.local.properties
 config/*.local.json
 
-# tools 临时采集（请用 test-runs/watch_*）
+# Local test artifacts (structure only in repo)
+test-runs/*
+!test-runs/.gitkeep
+
+# tools 临时采集
 tools/_live_logs/
 tools/_pull_*/
 tools/__pycache__/
+
+# Agent / scratch (勿提交)
+tmp_*
+wiki_params.json
+.cursor_commit_diff.txt
+.cursor/
 
 # Internal reference exports
 *.xlsx

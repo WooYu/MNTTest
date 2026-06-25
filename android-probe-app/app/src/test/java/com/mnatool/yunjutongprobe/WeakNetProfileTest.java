@@ -15,6 +15,14 @@ public class WeakNetProfileTest {
     }
 
     @Test
+    public void defaultsSelectClumsy() {
+        WeakNetProfile profile = WeakNetProfile.defaults();
+        assertEquals("Clumsy", profile.tool);
+        assertTrue(profile.isActive());
+        assertEquals("Clumsy", profile.displaySummary());
+    }
+
+    @Test
     public void clumsyProfileBuildsReadableSummary() {
         WeakNetProfile profile = new WeakNetProfile("Clumsy", "10", "30", "10", "outbound 113.133.169.192");
         assertTrue(profile.isActive());

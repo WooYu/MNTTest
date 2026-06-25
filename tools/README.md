@@ -58,31 +58,34 @@ adb -s <设备> install -r .\android-probe-app\app\build\outputs\apk\debug\app-d
 
 ### 双机联调（测试中）
 
-| 脚本 | 说明 |
-| --- | --- |
-| [`watch_dual_probe_run.ps1`](watch_dual_probe_run.ps1) | 双机 logcat 监听 → 等待 `done:` → 拉取最新 summary → 解读 `recv`/`perf` 与日志高亮 |
+联调时双端 logcat **手动采集**（各开一个 PowerShell 窗口），详见执行手册「联调诊断」节。默认序列号：探测 `50f08d16`、回显 `a4fbf4e7`。
 
-**操作顺序**：回显端启动回显 → 探测端选**同一 Broker** 后开始测试 → PC 执行脚本。
+**每个窗口须先 `cd` 到仓库根目录并创建 `test-runs`**，否则 `> .\test-runs\probe.log` 会报找不到路径。
 
 ```powershell
-# 完整：监听 + 拉取 + 解读
-.\tools\watch_dual_probe_run.ps1
+cd E:\Code_AI_Tool\MNATool
+New-Item -ItemType Directory -Force -Path .\test-runs | Out-Null
 
-# 测试已结束，仅拉取并解读
-.\tools\watch_dual_probe_run.ps1 -PullOnly
+# 测前清缓冲
+adb -s 50f08d16 logcat -c
+adb -s a4fbf4e7 logcat -c
 
-# 自定义序列号 / 输出目录
-.\tools\watch_dual_probe_run.ps1 -ProbeSerial 50f08d16 -EchoSerial a4fbf4e7 -OutDir .\test-runs\watch_debug
+# 窗口 A — 探测端
+adb -s 50f08d16 logcat -v threadtime ProbeApp:I ProbeApp:D ProbeApp:W ProbeApp:E *:S > .\test-runs\probe.log
+
+# 窗口 B — 回显端
+adb -s a4fbf4e7 logcat -v threadtime ProbeApp:I ProbeApp:D ProbeApp:W ProbeApp:E *:S > .\test-runs\echo.log
+
+# 测试结束后 Ctrl+C 停采；拉取导出
+.\tools\pull_probe_runs.ps1 -DeviceId 50f08d16 -OutDir .\test-runs\debug
 ```
-
-默认输出：`test-runs/watch_<时间戳>/`（含 `probe.log`、`echo.log`、`summary.json`、`meta.txt`）。
 
 | 脚本 | 说明 |
 | --- | --- |
 | [`analyze_dual_probe_logs.py`](analyze_dual_probe_logs.py) | 深度分析双端 logcat：RTT 尖峰聚类、读包空窗、GC/UI 卡顿关联 |
 
 ```powershell
-python tools/analyze_dual_probe_logs.py --dir .\test-runs\watch_<时间戳>
+python tools/analyze_dual_probe_logs.py --dir .\test-runs
 ```
 
 ---
@@ -117,7 +120,7 @@ python tools/run_abba_report.py `
   --b1 .\test-runs\R1-gz\B1_summary.json `
   --b2 .\test-runs\R1-gz\B2_summary.json `
   --a2 .\test-runs\R1-gz\A2_summary.json `
-  --scene "R1-gz 广州测试 现场千级" `
+  --scene "R1-gz 广州测试 实验室十万级" `
   --out .\test-runs\R1-gz\abba_report.md
 
 # 方向丢包
@@ -157,7 +160,7 @@ flowchart LR
   A[build_android_probe.ps1] --> B[双平板手动测试]
   B --> C{场景类型}
   C -->|正式归档| D[post_probe_run.ps1]
-  C -->|联调诊断| E[watch_dual_probe_run.ps1]
+  C -->|联调诊断| E[双机 adb logcat]
   D --> F[verify_probe_run.py]
   D --> G[run_abba_report.py]
   D --> H[loss_direction_report.py]
@@ -167,7 +170,7 @@ flowchart LR
 1. **编译安装** → `build_android_probe.ps1`
 2. **现场测试** → App 双机 MQTT（执行手册 §7）
 3. **正式归档** → 每轮 `post_probe_run.ps1`；ABBA 完成后 `run_abba_report.py`
-4. **联调排障** → `watch_dual_probe_run.ps1`；必要时 `pipeline_breakdown.py` / `analyze_dual_probe_logs.py`
+4. **联调排障** → 双机 adb logcat（见执行手册）；必要时 `pipeline_breakdown.py` / `analyze_dual_probe_logs.py`
 
 ---
 
@@ -177,9 +180,10 @@ flowchart LR
 
 | 原脚本 | 替代 |
 | --- | --- |
-| `capture_dual_probe_logs.ps1` / `.py` | `watch_dual_probe_run.ps1`（含拉取 summary 与字段解读） |
+| `capture_dual_probe_logs.ps1` / `.py` | 执行手册「联调诊断」双机 adb logcat + `pull_probe_runs.ps1` |
+| `watch_dual_probe_run.ps1` | 同上（已删除，改用手动 adb） |
 | `_verify_probe_run.py` | `verify_probe_run.py` |
 | `_diag_mqtt_connect.py` | 一次性 Broker 连通诊断，已删除 |
 | `test_real_mqtt_cn.py` | 真实 Broker 测试改由 Android 双平板 App 完成；协议逻辑用 `simulate_mqtt_probe.py` |
 
-临时采集目录（`_live_logs/`、`_pull_echo/` 等）不应提交仓库；联调输出请用 `test-runs/watch_*`。
+临时采集目录（`_live_logs/`、`_pull_echo/` 等）不应提交仓库；联调 logcat 输出请用 `test-runs/probe.log`、`test-runs/echo.log`。

@@ -25,6 +25,9 @@ public final class PacketEventStripView extends ScopeChartView {
     private ProbeMetrics metrics = ProbeMetrics.empty();
     private long timeoutNs = 1_500_000_000L;
     private boolean stoppedEarly;
+    private int[] bucketTotal = new int[0];
+    private int[] bucketLoss = new int[0];
+    private int[] bucketHighRtt = new int[0];
 
     public PacketEventStripView(Context context) {
         super(context);
@@ -47,8 +50,15 @@ public final class PacketEventStripView extends ScopeChartView {
         this.metrics = metrics;
         this.timeoutNs = timeoutMs * 1_000_000L;
         this.stoppedEarly = stoppedEarly;
-        this.samples = new ArrayList<>(samples);
-        sortIfNeeded(this.samples);
+        if (samples == null) {
+            this.samples = new ArrayList<>();
+        } else {
+            this.samples = samples;
+            sortIfNeeded(this.samples);
+        }
+        if (viewport != null && viewport.isInteracting()) {
+            return;
+        }
         invalidate();
     }
 
@@ -61,10 +71,12 @@ public final class PacketEventStripView extends ScopeChartView {
         int right = dp(RIGHT_PAD_DP);
         int top = dp(6);
         int bottom = height - dp(6);
-        int spacing = spacingPx();
-        int barWidth = dp(BAR_WIDTH_DP);
-        float half = barWidth / 2f;
+        float spacing = spacingPx();
+        float half = eventBarHalfWidth(spacing, BAR_WIDTH_DP);
+        float corner = eventBarCornerRadius(half);
         float originX = left - offsetPx() + leadingShiftPx();
+        // 事件条比 RTT 更晚进入分桶，尽量保持逐条可辨
+        boolean bucketed = spacing < 1f;
 
         // 固定灰色轨道背景（不随数据滚动）
         rect.set(left, top, width - right, bottom);
@@ -77,31 +89,139 @@ public final class PacketEventStripView extends ScopeChartView {
 
         long nowNs = System.nanoTime();
         double p95 = Math.max(metrics.p95RttMs, 1.0);
-        float cullLeft = -spacing;
-        float cullRight = width + spacing;
-        for (ProbeSample sample : samples) {
+        int plotLeft = left;
+        int plotRight = width - right;
+
+        if (bucketed) {
+            drawBucketed(canvas, plotLeft, plotRight, originX, spacing, top, bottom, p95, nowNs);
+        } else {
+            float cullLeft = plotLeft - spacing;
+            float cullRight = plotRight + spacing;
+            int from = lowerBoundBySeq(samples, visibleSeqStart((int) cullLeft, plotLeft));
+            int to = upperBoundBySeq(samples, visibleSeqEnd((int) cullRight, plotLeft));
+            for (int i = from; i < to; i++) {
+                ProbeSample sample = samples.get(i);
+                float cx = originX + Math.max(0, sample.seq) * spacing;
+                if (cx + half < cullLeft || cx - half > cullRight) {
+                    continue;
+                }
+                int color = eventColor(sample, p95, nowNs);
+                if (color == 0) {
+                    continue;
+                }
+                barPaint.setColor(color);
+                rect.set(cx - half, top + dp(2), cx + half, bottom - dp(2));
+                canvas.drawRoundRect(rect, corner, corner, barPaint);
+            }
+        }
+    }
+
+    /** 全览：每像素列按包占比着色（多数正常则绿，丢包占比高才红），避免「列内有一个丢包就整列红」。 */
+    private void drawBucketed(Canvas canvas, int plotLeft, int plotRight, float originX, float spacing,
+            int top, int bottom, double p95, long nowNs) {
+        int bucketCount = Math.max(1, plotRight - plotLeft);
+        ensureBucketCapacity(bucketCount);
+        java.util.Arrays.fill(bucketTotal, 0, bucketCount, 0);
+        java.util.Arrays.fill(bucketLoss, 0, bucketCount, 0);
+        java.util.Arrays.fill(bucketHighRtt, 0, bucketCount, 0);
+
+        int seqMin = visibleSeqStart(plotLeft, plotLeft);
+        int seqMax = visibleSeqEnd(plotRight, plotLeft);
+        int from = lowerBoundBySeq(samples, seqMin);
+        int to = upperBoundBySeq(samples, seqMax);
+        for (int i = from; i < to; i++) {
+            ProbeSample sample = samples.get(i);
             float cx = originX + Math.max(0, sample.seq) * spacing;
-            if (cx + half < cullLeft || cx - half > cullRight) {
+            int px = Math.round(cx);
+            if (px < plotLeft || px >= plotRight) {
                 continue;
             }
-            int color;
-            if (!sample.received()) {
-                boolean expired = metrics.finalResult || nowNs - sample.clientSendNs > timeoutNs;
-                if (stoppedEarly && !expired) {
-                    color = Palette.CHART_PENDING;
-                } else if (!expired) {
-                    continue; // 尚未超时的在途包不画，保留灰色轨道
-                } else {
-                    color = Palette.DANGER;
-                }
-            } else if (sample.rttMs() >= p95) {
-                color = Palette.WARNING;
-            } else {
-                color = Palette.SUCCESS;
+            int bi = px - plotLeft;
+            bucketTotal[bi]++;
+            int sev = eventSeverity(sample, p95, nowNs);
+            if (sev == 4 || sev == 3) {
+                bucketLoss[bi]++;
+            } else if (sev == 2) {
+                bucketHighRtt[bi]++;
             }
+        }
+
+        float stripTop = top + dp(2);
+        float stripBottom = bottom - dp(2);
+        float half = Math.max(0.35f, spacing * 0.34f);
+        float corner = eventBarCornerRadius(half);
+        for (int bi = 0; bi < bucketCount; bi++) {
+            int total = bucketTotal[bi];
+            if (total <= 0) {
+                continue;
+            }
+            int color = bucketColor(bucketLoss[bi], bucketHighRtt[bi], total);
+            if (color == 0) {
+                continue;
+            }
+            float cx = plotLeft + bi + 0.5f;
             barPaint.setColor(color);
-            rect.set(cx - half, top + dp(2), cx + half, bottom - dp(2));
-            canvas.drawRoundRect(rect, dp(2), dp(2), barPaint);
+            rect.set(cx - half, stripTop, cx + half, stripBottom);
+            canvas.drawRoundRect(rect, corner, corner, barPaint);
+        }
+    }
+
+    private static int bucketColor(int lossCount, int highRttCount, int total) {
+        if (lossCount * 2 >= total) {
+            return Palette.DANGER;
+        }
+        if (lossCount > 0) {
+            return Palette.WARNING;
+        }
+        if (highRttCount * 2 >= total) {
+            return Palette.WARNING;
+        }
+        return Palette.SUCCESS;
+    }
+
+    private void ensureBucketCapacity(int bucketCount) {
+        if (bucketTotal.length >= bucketCount) {
+            return;
+        }
+        bucketTotal = new int[bucketCount];
+        bucketLoss = new int[bucketCount];
+        bucketHighRtt = new int[bucketCount];
+    }
+
+    /** @return 0 表示跳过（在途未超时） */
+    private int eventColor(ProbeSample sample, double p95, long nowNs) {
+        return severityToColor(eventSeverity(sample, p95, nowNs));
+    }
+
+    private int eventSeverity(ProbeSample sample, double p95, long nowNs) {
+        if (!sample.received()) {
+            boolean expired = metrics.finalResult || nowNs - sample.clientSendNs > timeoutNs;
+            if (stoppedEarly && !expired) {
+                return 3;
+            }
+            if (!expired) {
+                return 0;
+            }
+            return 4;
+        }
+        if (sample.rttMs() >= p95) {
+            return 2;
+        }
+        return 1;
+    }
+
+    private static int severityToColor(int severity) {
+        switch (severity) {
+            case 1:
+                return Palette.SUCCESS;
+            case 2:
+                return Palette.WARNING;
+            case 3:
+                return Palette.CHART_PENDING;
+            case 4:
+                return Palette.DANGER;
+            default:
+                return 0;
         }
     }
 
