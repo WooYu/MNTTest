@@ -10,6 +10,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+_TOOLS = Path(__file__).resolve().parent
+if str(_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_TOOLS))
+
+from probe_run_lib import weak_net_line, weak_net_setting
+
 
 METRICS = [
     ("lossRate", "丢包率", True),
@@ -37,40 +43,6 @@ def pct_improve(baseline: float, accelerated: float, lower_is_better: bool) -> f
     if not lower_is_better:
         delta = -delta
     return delta
-
-
-def weak_net_line(data: dict[str, Any]) -> str:
-    wn = data.get("weakNetProfile") or {}
-    if not wn or wn.get("tool") in (None, "", "无"):
-        parts = []
-        if wn.get("lossPercent"):
-            parts.append(f"丢包 {wn['lossPercent']}%")
-        if wn.get("delayMs"):
-            parts.append(f"延迟 +{wn['delayMs']}ms")
-        if wn.get("jitterMs"):
-            parts.append(f"抖动 {wn['jitterMs']}ms")
-        return "无" if not parts else "，".join(parts)
-    tool = wn.get("tool", "无")
-    parts = [tool]
-    if wn.get("lossPercent"):
-        parts.append(f"丢包 {wn['lossPercent']}%")
-    if wn.get("delayMs"):
-        parts.append(f"延迟 +{wn['delayMs']}ms")
-    if wn.get("jitterMs"):
-        parts.append(f"抖动 {wn['jitterMs']}ms")
-    if wn.get("note"):
-        parts.append(str(wn["note"]))
-    return "，".join(parts)
-
-
-def weak_net_setting(data: dict[str, Any]) -> dict[str, str]:
-    """提取 Clumsy 注入设定值（丢包% / 延迟ms / 抖动ms）。"""
-    wn = data.get("weakNetProfile") or {}
-    return {
-        "loss": str(wn.get("lossPercent", "") or ""),
-        "delay": str(wn.get("delayMs", "") or ""),
-        "jitter": str(wn.get("jitterMs", "") or ""),
-    }
 
 
 def verdict(improvements: dict[str, float | None]) -> str:
@@ -105,7 +77,7 @@ def data_valid(a_runs: list[dict], b_runs: list[dict]) -> tuple[bool, list[str]]
     b_vpn = [r.get("vpnActiveAtStart") for r in b_runs]
     if b_vpn and not all(b_vpn):
         issues.append("加速组存在 vpnActiveAtStart=false")
-    wn = {weak_net_line(r) for r in all_runs}
+    wn = {weak_net_line(r, empty_label="无") for r in all_runs}
     if len(wn) > 1:
         issues.append(f"弱网 Profile 不一致: {wn}")
     return len(issues) == 0, issues
@@ -149,7 +121,7 @@ def build_report(
     lines.append("## 弱网 Profile")
     lines.append("")
     for label, data in [("A1", a1), ("B1", b1), ("B2", b2), ("A2", a2)]:
-        lines.append(f"- **{label}:** {weak_net_line(data)}")
+        lines.append(f"- **{label}:** {weak_net_line(data, empty_label='无')}")
 
     setting = weak_net_setting(a1)
     has_weak = any(
@@ -220,7 +192,7 @@ def build_report(
     lines.append("")
     lines.append("```text")
     proto = a1.get("protocol", "-")
-    wn = weak_net_line(a1)
+    wn = weak_net_line(a1, empty_label="无")
     loss_imp = improvements.get("lossRate")
     p95_imp = improvements.get("p95RttMs")
     a_loss = avg([float(r.get("lossRate", 0)) for r in a_runs]) * 100

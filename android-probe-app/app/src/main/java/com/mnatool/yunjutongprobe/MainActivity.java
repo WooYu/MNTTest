@@ -142,6 +142,7 @@ public final class MainActivity extends Activity {
     private ProbeMetrics prevMetrics;
     private ProbeConfig prevConfig;
     private ProbePerfStats lastPerfStats;
+    private ProbeRecvStats lastRecvStats;
     private List<EchoRecord> lastEchoRecords;
     private long lastChartUpdateMs;
     private View pageConfig;
@@ -2649,7 +2650,7 @@ public final class MainActivity extends Activity {
                     parseInt(portInput, "端口", 1, 65535),
                     parseInt(countInput, "发包数量", 1, 200000),
                     parseInt(ppsInput, "每秒发包数", 1, 2000),
-                    parseInt(packetBytesInput, "数据包大小", 80, 1400),
+                    parseInt(packetBytesInput, "数据包大小", ProbePayloadCodec.MIN_PACKET_BYTES, 1400),
                     parseInt(timeoutInput, "超时时间", 100, 300000),
                     modeSpinner.getSelectedItem().toString(),
                     UUID.randomUUID().toString().replace("-", "").substring(0, 12),
@@ -2670,6 +2671,7 @@ public final class MainActivity extends Activity {
             lastSamples = new ArrayList<>();
             lastMetrics = ProbeMetrics.empty();
             lastPerfStats = null;
+            lastRecvStats = null;
             lastEchoRecords = null;
             scopeViewport.reset();
             if (packetRecordView != null) packetRecordView.setText("");
@@ -2722,6 +2724,13 @@ public final class MainActivity extends Activity {
                 public void onPerfStats(ProbePerfStats stats) {
                     runOnUiThread(() -> {
                         if (flow.accepts(runId)) lastPerfStats = stats;
+                    });
+                }
+
+                @Override
+                public void onRecvStats(ProbeRecvStats stats) {
+                    runOnUiThread(() -> {
+                        if (flow.accepts(runId)) lastRecvStats = stats;
                     });
                 }
 
@@ -3026,7 +3035,8 @@ public final class MainActivity extends Activity {
             return;
         }
         try {
-            File[] files = ProbeStorage.writeRun(this, lastConfig, lastMetrics, new ArrayList<>(lastSamples), lastPerfStats);
+            File[] files = ProbeStorage.writeRun(this, lastConfig, lastMetrics, new ArrayList<>(lastSamples),
+                    lastPerfStats, lastRecvStats);
             exportView.setText("已导出至 " + ProbeStorage.downloadsDisplayPath() + "/"
                     + files[0].getParentFile().getName() + "/\n"
                     + "CSV: " + files[0].getName() + "\n"

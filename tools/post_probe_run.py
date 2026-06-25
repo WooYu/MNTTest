@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import shutil
 import sys
 from datetime import datetime
@@ -22,12 +21,12 @@ if str(_TOOLS) not in sys.path:
     sys.path.insert(0, str(_TOOLS))
 
 from probe_run_lib import (
-    MANIFEST_HEADERS,
     check_data_quality,
     check_overload,
     find_run_pairs,
     is_high_pps_run,
     load_summary,
+    upsert_manifest,
     verify_run,
     weak_net_line,
 )
@@ -39,16 +38,6 @@ def repo_root() -> Path:
 
 def default_manifest() -> Path:
     return repo_root() / "test-runs" / "scenario_manifest.csv"
-
-
-def append_manifest(manifest: Path, row: dict[str, str]) -> None:
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not manifest.is_file()
-    with manifest.open("a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=MANIFEST_HEADERS)
-        if write_header:
-            writer.writeheader()
-        writer.writerow({k: row.get(k, "") for k in MANIFEST_HEADERS})
 
 
 def archive_abba_summary(scene_dir: Path, abba_round: str, summary_path: Path) -> Path:
@@ -63,6 +52,7 @@ def process_run(
     scene_dir: Path,
     abba_round: str,
     manifest: Path,
+    force_append: bool,
 ) -> int:
     summary = load_summary(pair.summary_path)
     verify = verify_run(pair.csv_path, pair.summary_path)
@@ -99,7 +89,7 @@ def process_run(
         print(f"  ABBA 归档 : {dest.name}")
 
     rel_path = pair.run_dir.relative_to(scene_dir) if pair.run_dir.is_relative_to(scene_dir) else pair.run_dir
-    append_manifest(
+    manifest_action = upsert_manifest(
         manifest,
         {
             "archived_at": archived_at,
@@ -120,8 +110,10 @@ def process_run(
             "overload_reasons": "; ".join(overload.reasons + quality_issues),
             "local_path": str(rel_path),
         },
+        force_append=force_append,
     )
-    print(f"  场景表    : 已追加 → {manifest}")
+    action_label = {"created": "已写入", "updated": "已更新", "appended": "已追加"}[manifest_action]
+    print(f"  场景表    : {action_label} → {manifest}")
     if abba_dest:
         print(f"             ABBA 副本 → {abba_dest}")
 
@@ -135,6 +127,11 @@ def main() -> int:
     parser.add_argument("--abba-round", default="", help="ABBA 轮次：A1/B1/B2/A2（可选，用于重命名 summary）")
     parser.add_argument("--latest-only", action="store_true", help="仅处理最新一轮 run")
     parser.add_argument("--manifest", default="", help="场景表 CSV 路径（默认 test-runs/scenario_manifest.csv）")
+    parser.add_argument(
+        "--force-append",
+        action="store_true",
+        help="场景表总是追加新行（默认按 scene_id+abba_round+run_id 去重覆盖）",
+    )
     args = parser.parse_args()
 
     root = Path(args.dir).resolve()
@@ -159,7 +156,7 @@ def main() -> int:
 
     exit_code = 0
     for pair in targets:
-        code = process_run(pair, scene_id, root, abba_round, manifest)
+        code = process_run(pair, scene_id, root, abba_round, manifest, args.force_append)
         exit_code = max(exit_code, code)
 
     return exit_code

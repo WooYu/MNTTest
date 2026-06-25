@@ -7,7 +7,7 @@ import android.content.SharedPreferences;
  * 按本机角色把对应一侧的 SN/密码/MAC 与 Topic 镜像写入主表单。
  */
 final class MqttPairProfile {
-    // 与 tools/test_real_mqtt_cn.py 中 Echo 侧测试凭据一致，仅作导入对话框默认值。
+    // 西安双机测试默认值，仅作导入对话框预设。
     private static final String DEFAULT_RECEIVER_SN = "V37C00000133";
     private static final String DEFAULT_RECEIVER_PWD = "253602";
     private static final String DEFAULT_RECEIVER_MAC = "00:03:7f:12:34:56";

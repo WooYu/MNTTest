@@ -29,4 +29,4 @@ foreach ($f in $files) {
 
 Write-Host ""
 Write-Host "Next: verify a run pair with:"
-Write-Host "  python tools\_verify_probe_run.py <samples.csv> <summary.json>"
+Write-Host "  python tools/verify_probe_run.py <samples.csv> <summary.json>"

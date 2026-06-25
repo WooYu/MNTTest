@@ -15,8 +15,15 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from pathlib import Path
 from typing import Any
+
+_TOOLS = Path(__file__).resolve().parent
+if str(_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_TOOLS))
+
+from probe_run_lib import weak_net_line, weak_net_setting
 
 METRICS = [
     ("lossRate", "丢包率", True),
@@ -47,31 +54,6 @@ def pct_improve(baseline: float, accelerated: float, lower_is_better: bool) -> f
     if not lower_is_better:
         delta = -delta
     return delta
-
-
-def weak_net_line(data: dict[str, Any]) -> str:
-    wn = data.get("weakNetProfile") or {}
-    tool = wn.get("tool")
-    parts = []
-    if tool and tool not in ("", "无"):
-        parts.append(str(tool))
-    if wn.get("lossPercent"):
-        parts.append(f"丢包{wn['lossPercent']}%")
-    if wn.get("delayMs"):
-        parts.append(f"延迟+{wn['delayMs']}ms")
-    if wn.get("jitterMs"):
-        parts.append(f"抖动{wn['jitterMs']}ms")
-    return "正常网" if not parts else "，".join(parts)
-
-
-def weak_net_setting(data: dict[str, Any]) -> dict[str, str]:
-    """提取 Clumsy 注入设定值（丢包% / 延迟ms / 抖动ms）。"""
-    wn = data.get("weakNetProfile") or {}
-    return {
-        "loss": str(wn.get("lossPercent", "") or ""),
-        "delay": str(wn.get("delayMs", "") or ""),
-        "jitter": str(wn.get("jitterMs", "") or ""),
-    }
 
 
 def tier(count: int) -> str:

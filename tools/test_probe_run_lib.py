@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from probe_run_lib import check_overload, verify_run, weak_net_line
+from probe_run_lib import check_overload, upsert_manifest, verify_run, weak_net_line
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -103,6 +103,42 @@ class ProbeRunLibTest(unittest.TestCase):
         text = weak_net_line({"weakNetProfile": {"tool": "Clumsy", "lossPercent": 10, "delayMs": 30}})
         self.assertIn("Clumsy", text)
         self.assertIn("10%", text)
+        self.assertEqual("无", weak_net_line({"weakNetProfile": {}}, empty_label="无"))
+
+    def test_upsert_manifest_dedupes_by_scene_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "scenario_manifest.csv"
+            base = {
+                "archived_at": "2026-01-01 00:00:00",
+                "scene_id": "P0-1",
+                "abba_round": "A1",
+                "run_id": "run-abc",
+                "mode_tag": "未加速",
+                "vpn_active": "false",
+                "weak_net_profile": "正常网",
+                "protocol": "MQTT",
+                "count": "1000",
+                "pps": "10",
+                "sent": "1000",
+                "received": "990",
+                "loss_rate": "0.0100",
+                "verify_ok": "true",
+                "overload": "false",
+                "overload_reasons": "",
+                "local_path": "run-abc",
+            }
+            self.assertEqual("created", upsert_manifest(manifest, base))
+            updated = dict(base)
+            updated["archived_at"] = "2026-01-02 00:00:00"
+            updated["received"] = "995"
+            self.assertEqual("updated", upsert_manifest(manifest, updated))
+            text = manifest.read_text(encoding="utf-8-sig")
+            self.assertEqual(2, text.strip().count("\n") + 1)  # header + 1 row
+            self.assertIn("995", text)
+            self.assertNotIn("990", text)
+            self.assertEqual("appended", upsert_manifest(manifest, base, force_append=True))
+            lines = manifest.read_text(encoding="utf-8-sig").strip().splitlines()
+            self.assertEqual(3, len(lines))  # header + 2 data rows
 
 
 if __name__ == "__main__":

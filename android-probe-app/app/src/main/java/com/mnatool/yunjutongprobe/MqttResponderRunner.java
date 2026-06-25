@@ -244,16 +244,18 @@ final class MqttResponderRunner implements ProbeRunner {
 
     private void processIncoming(IncomingProbe item, ProbeCallback callback, long sessionStartMs) throws Exception {
         long recvNs = item.recvNs;
+        long recvMs = System.currentTimeMillis();
         long sendNs = System.nanoTime();
+        long sendMs = System.currentTimeMillis();
         ProbePayloadCodec.EchoStampResult stamped = ProbePayloadCodec.stampEchoOnce(
-                item.payload, recvNs, sendNs);
+                item.payload, recvNs, sendNs, recvMs, sendMs);
         if (!stamped.probePacket) {
             return;
         }
         EchoStamp stamp = recordEchoIfNeeded(stamped);
         sendPublishBuffered(publishTopic, stamped.payload);
         int echoed = echoedCount.incrementAndGet();
-        logEchoStamp(stamp, recvNs, sendNs, sessionStartMs);
+        logEchoStamp(stamp, recvNs, recvMs, sendNs, sessionStartMs);
         logEchoProgress(callback, receivedCount.get(), echoed, stamped.payload.length, sessionStartMs);
     }
 
@@ -317,15 +319,15 @@ final class MqttResponderRunner implements ProbeRunner {
                 Log.d(TAG, "echo recv seq=" + stamped.seq + " ts=" + recvMs + (duplicate ? " dup" : ""));
             }
         }
-        return new EchoStamp(stamped.seq, stamped.clientSendNs, duplicate);
+        return new EchoStamp(stamped.seq, stamped.clientSendNs, stamped.clientSendMs, duplicate);
     }
 
     private static boolean shouldLogEchoRecv(int seq) {
         return seq < DETAILED_LOG_MAX_COUNT || seq % MILESTONE_INTERVAL == 0;
     }
 
-    /** 联调日志：回显处理耗时 + 相对探测端 clientSendNs 的去程到达延迟。 */
-    private static void logEchoStamp(EchoStamp stamp, long recvNs, long sendNs, long sessionStartMs) {
+    /** 联调日志：回显处理耗时 + 相对探测端 clientSendMs 的去程到达延迟（wall-clock）。 */
+    private static void logEchoStamp(EchoStamp stamp, long recvNs, long recvMs, long sendNs, long sessionStartMs) {
         if (stamp.seq < 0) {
             return;
         }
@@ -336,10 +338,8 @@ final class MqttResponderRunner implements ProbeRunner {
             return;
         }
         double procUs = (sendNs - recvNs) / 1000.0;
-        String inbound = "n/a";
-        if (stamp.clientSendNs > 0) {
-            inbound = String.format(Locale.US, "%.1fms", (recvNs - stamp.clientSendNs) / 1_000_000.0);
-        }
+        String inbound = ProbeSegmentTiming.formatInboundLog(
+                stamp.clientSendNs, stamp.clientSendMs, recvNs, recvMs);
         Log.d(TAG, "echo stamp seq=" + stamp.seq
                 + " inbound=" + inbound
                 + " procUs=" + String.format(Locale.US, "%.1f", procUs)
@@ -349,11 +349,13 @@ final class MqttResponderRunner implements ProbeRunner {
     private static final class EchoStamp {
         final int seq;
         final long clientSendNs;
+        final long clientSendMs;
         final boolean duplicate;
 
-        EchoStamp(int seq, long clientSendNs, boolean duplicate) {
+        EchoStamp(int seq, long clientSendNs, long clientSendMs, boolean duplicate) {
             this.seq = seq;
             this.clientSendNs = clientSendNs;
+            this.clientSendMs = clientSendMs;
             this.duplicate = duplicate;
         }
     }
@@ -522,17 +524,21 @@ final class MqttResponderRunner implements ProbeRunner {
 
     /** 已收到 header 后的后续读：超时重试，避免 100ms soTimeout 中断半包读取。 */
     private int readByteRetry() throws Exception {
-        while (true) {
+        while (running.get()) {
             try {
                 return input.read();
             } catch (java.net.SocketTimeoutException ignored) {
             }
         }
+        return -1;
     }
 
     private void readFully(byte[] buffer, int offset, int length) throws Exception {
         int end = offset + length;
         while (offset < end) {
+            if (!running.get()) {
+                throw new IllegalStateException("MQTT body closed");
+            }
             try {
                 int read = input.read(buffer, offset, end - offset);
                 if (read < 0) {

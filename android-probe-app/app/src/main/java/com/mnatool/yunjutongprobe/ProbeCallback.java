@@ -18,6 +18,10 @@ interface ProbeCallback {
     default void onPerfStats(ProbePerfStats stats) {
     }
 
+    /** 收包停滞/过载侧写（探测端结束后回调一次）。默认忽略。 */
+    default void onRecvStats(ProbeRecvStats stats) {
+    }
+
     /** 回显端结束时回传去程到达记录（用于方向级丢包对齐）。默认忽略。 */
     default void onEchoRecords(List<EchoRecord> records) {
     }

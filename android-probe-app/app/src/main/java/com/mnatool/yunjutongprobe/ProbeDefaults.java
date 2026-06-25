@@ -5,12 +5,12 @@ import android.content.SharedPreferences;
 /** 探测参数双档预设：现场千级（默认）与实验室十万级。 */
 final class ProbeDefaults {
     static final String PREFERENCE_VERSION_KEY = "probeDefaultsVersion";
-    static final int VERSION = 3;
+    static final int VERSION = 4;
 
     /** 参数预设档位：一键填充 发包数/速率/包大小/超时。 */
     enum Preset {
         FIELD("现场千级", "1000", "10", "200", "5000"),
-        LAB("实验室十万级", "100000", "500", "1000", "60000");
+        LAB("实验室十万级", "100000", "2000", "100", "60000");
 
         final String label;
         final String count;
@@ -46,14 +46,14 @@ final class ProbeDefaults {
         return null;
     }
 
-    /** 实验室十万级等高 PPS 场景不在回显端逐条记 seq，避免 echoLog/GC 成为瓶颈。 */
+    /** 与 tools/probe_run_lib.is_high_pps_run 对齐：count≥5万 或 pps≥500 视为高 PPS。 */
+    static boolean isHighPpsRun(int count, int pps) {
+        return count >= 50_000 || pps >= 500;
+    }
+
+    /** 高 PPS 场景不在回显端逐条记 seq，避免 echoLog/GC 成为瓶颈。 */
     static boolean recordEchoSeqForConfig(int count, int pps, int packetBytes, int timeoutMs) {
-        Preset preset = detectPreset(
-                String.valueOf(count),
-                String.valueOf(pps),
-                String.valueOf(packetBytes),
-                String.valueOf(timeoutMs));
-        return preset != Preset.LAB;
+        return !isHighPpsRun(count, pps);
     }
 
     /** 首屏预填档位：现场千级（时长短、最常用）。如需默认十万级改为 Preset.LAB。 */
@@ -68,9 +68,8 @@ final class ProbeDefaults {
     private static final String LEGACY_COUNT = "300";
     private static final String LEGACY_PPS = "5";
     private static final String LEGACY_TIMEOUT_MS = "5000";
-    /** VERSION=2 实验室十万级曾用 2000 PPS（测试 Broker 易过载），迁移为 500。 */
+    /** VERSION=3 实验室十万级曾用 500/2000 PPS + 1000B，迁移为 2000 PPS / 100B。 */
     private static final String LEGACY_LAB_COUNT = "100000";
-    private static final String LEGACY_LAB_PPS = "2000";
     private static final String LEGACY_LAB_BYTES = "1000";
 
     private ProbeDefaults() {
@@ -97,10 +96,14 @@ final class ProbeDefaults {
         if (LEGACY_TIMEOUT_MS.equals(prefs.getString("timeoutMs", LEGACY_TIMEOUT_MS))) {
             editor.putString("timeoutMs", TIMEOUT_MS);
         }
-        if (LEGACY_LAB_COUNT.equals(prefs.getString("count", ""))
-                && LEGACY_LAB_PPS.equals(prefs.getString("pps", ""))
-                && LEGACY_LAB_BYTES.equals(prefs.getString("packetBytes", ""))) {
+        String count = prefs.getString("count", "");
+        String pps = prefs.getString("pps", "");
+        String packetBytes = prefs.getString("packetBytes", "");
+        if (LEGACY_LAB_COUNT.equals(count)
+                && LEGACY_LAB_BYTES.equals(packetBytes)
+                && ("500".equals(pps) || "2000".equals(pps))) {
             editor.putString("pps", Preset.LAB.pps);
+            editor.putString("packetBytes", Preset.LAB.packetBytes);
         }
         editor.apply();
     }

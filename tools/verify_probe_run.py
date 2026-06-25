@@ -13,7 +13,7 @@ from probe_run_lib import load_summary, verify_run
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("用法: python tools/_verify_probe_run.py <samples.csv> <summary.json>")
+        print("用法: python tools/verify_probe_run.py <samples.csv> <summary.json>")
         return 2
 
     csv_path = Path(sys.argv[1])

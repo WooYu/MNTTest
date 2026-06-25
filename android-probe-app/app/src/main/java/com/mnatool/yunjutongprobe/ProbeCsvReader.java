@@ -48,6 +48,7 @@ final class ProbeCsvReader {
             String error = fields[18];
 
             long clientSendNs = clientSendMs * 1_000_000L;
+            // CSV 回放以 rtt_ms 列为准，用 nano 反推以保持小数精度（与 live compact 毫秒口径无关）
             ProbeSample sample = new ProbeSample(runId, seq, clientSendNs, clientSendMs, packetBytes, vpnActive);
             if (received) {
                 sample.clientRecvNs = rttMs > 0

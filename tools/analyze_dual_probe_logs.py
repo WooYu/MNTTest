@@ -217,7 +217,7 @@ def analyze(probe_events: list[LogEvent], echo_events: list[LogEvent]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="分析双端 probe 实时 logcat")
-    parser.add_argument("--dir", required=True, help="capture_dual_probe_logs.ps1 输出目录")
+    parser.add_argument("--dir", required=True, help="watch_dual_probe_run.ps1 输出目录（含 probe.log / echo.log）")
     args = parser.parse_args()
     d = Path(args.dir)
     probe = load_log(d / "probe.log", "probe")

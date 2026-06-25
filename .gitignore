@@ -20,6 +20,11 @@ dist/
 *.local.properties
 config/*.local.json
 
+# tools 临时采集（请用 test-runs/watch_*）
+tools/_live_logs/
+tools/_pull_*/
+tools/__pycache__/
+
 # Internal reference exports
 *.xlsx
 

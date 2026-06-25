@@ -1,7 +1,5 @@
 package com.mnatool.yunjutongprobe;
 
-import org.json.JSONObject;
-
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
@@ -39,6 +37,7 @@ final class MqttProbeRunner implements ProbeRunner {
     private volatile InputStream input;
     private volatile OutputStream output;
     private volatile int packetId = 1;
+    private volatile ProbeRecvStats activeRecvStats;
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -48,6 +47,7 @@ final class MqttProbeRunner implements ProbeRunner {
         }
         samples.clear();
         highestReceivedSeq.set(-1);
+        activeRecvStats = null;
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -94,36 +94,48 @@ final class MqttProbeRunner implements ProbeRunner {
             long lastMetricsNs = 0;
             long lastPingNs = System.nanoTime();
             ProbePerfStats perf = new ProbePerfStats(config.pps);
+            ProbeRecvStats recvStats = new ProbeRecvStats();
+            activeRecvStats = recvStats;
             Log.i(TAG, "probe loop: count=" + config.count + " pps=" + config.pps + " topic=" + config.mqttPublishTopic);
-            for (int seq = 0; seq < config.count && running.get(); seq++) {
+            int sentSeq = 0;
+            for (sentSeq = 0; sentSeq < config.count && running.get(); sentSeq++) {
                 long nowNs = System.nanoTime();
+                nextNs = ProbeSendScheduler.capCatchUp(nowNs, nextNs, intervalNs, recvStats);
                 if (nowNs < nextNs) {
                     sleepNs(nextNs - nowNs);
+                }
+                if (recvStats.checkStall(System.nanoTime(), true, sentSeq, callback)) {
+                    recvStats.markPublishStoppedEarly(sentSeq);
+                    callback.onEvent("收包停滞，提前结束发包（已发 " + sentSeq + " / " + config.count + "）");
+                    break;
                 }
 
                 boolean vpnActive = config.vpnActiveAtStart;
                 long sendNs = System.nanoTime();
                 perf.beforeSend(sendNs, nextNs);
                 long sendMs = System.currentTimeMillis();
-                byte[] payload = ProbePayloadCodec.buildPayload(config, seq, sendNs, sendMs, vpnActive);
+                byte[] payload = ProbePayloadCodec.buildPayload(config, sentSeq, sendNs, sendMs, vpnActive);
+                boolean compactPayload = ProbePayloadCodec.usesCompactPayload(config);
                 ProbeSample sample = new ProbeSample(
                         config.runId,
-                        seq,
+                        sentSeq,
                         sendNs,
                         sendMs,
                         payload.length,
-                        vpnActive
+                        vpnActive,
+                        compactPayload
                 );
-                samples.put(seq, sample);
+                samples.put(sentSeq, sample);
                 sendPublish(config.mqttPublishTopic, payload);
                 perf.afterSend();
-                if (seq % 50 == 0) {
-                    Log.d(TAG, "publish seq=" + seq + "/" + config.count
+                if (sentSeq % 50 == 0) {
+                    Log.d(TAG, "publish seq=" + sentSeq + "/" + config.count
                             + " highestRecv=" + highestReceivedSeq.get());
                 }
                 nextNs += intervalNs;
 
                 long metricsNow = System.nanoTime();
+                recvStats.checkStall(metricsNow, true, sentSeq, callback);
                 if (metricsNow - lastPingNs >= 20_000_000_000L) {
                     sendPingReq();
                     lastPingNs = metricsNow;
@@ -138,11 +150,14 @@ final class MqttProbeRunner implements ProbeRunner {
                 callback.onEvent(perf.warningText());
             }
             callback.onPerfStats(perf);
+            callback.onRecvStats(recvStats);
 
             long waitUntilNs = System.nanoTime() + timeoutNs;
             while (running.get() && System.nanoTime() < waitUntilNs) {
-                callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
-                if (snapshot(timeoutNs, false).received >= config.count) {
+                recvStats.checkStall(System.nanoTime(), false, sentSeq, callback);
+                ProbeMetrics waitMetrics = snapshot(timeoutNs, false);
+                callback.onMetrics(waitMetrics, snapshotSamples());
+                if (waitMetrics.received >= config.count) {
                     break;
                 }
                 sleepNs(100_000_000L);
@@ -325,11 +340,11 @@ final class MqttProbeRunner implements ProbeRunner {
             return;
         }
         String payloadText = new String(body, payloadStart, body.length - payloadStart, StandardCharsets.UTF_8);
-        JSONObject ack = new JSONObject(payloadText);
-        if (!config.runId.equals(ack.optString("runId", ""))) {
+        ProbePayloadCodec.ParsedEcho echo = ProbePayloadCodec.parseEchoPayload(payloadText, config.runId);
+        if (echo == null) {
             return;
         }
-        int seq = ack.optInt("seq", -1);
+        int seq = echo.seq;
         ProbeSample sample = samples.get(seq);
         if (sample == null) {
             return;
@@ -339,27 +354,22 @@ final class MqttProbeRunner implements ProbeRunner {
             return;
         }
         sample.clientRecvNs = System.nanoTime();
-        sample.serverRecvNs = ack.optLong("serverRecvNs", 0);
-        sample.serverSendNs = ack.optLong("serverSendNs", 0);
-        double rttMs = (sample.clientRecvNs - sample.clientSendNs) / 1_000_000.0;
-        Log.d(TAG, formatEchoRttLog(seq, sample, rttMs));
+        sample.clientRecvMs = System.currentTimeMillis();
+        if (!echo.compact && echo.jsonAck != null) {
+            ProbeSegmentTiming.applyEchoTimestamps(sample, echo.jsonAck, sample.clientRecvMs);
+        }
+        double rttMs = sample.rttMs();
+        Log.d(TAG, ProbeSegmentTiming.formatEchoRttLog(seq, sample, rttMs));
         int previousHigh = highestReceivedSeq.getAndUpdate(old -> Math.max(old, seq));
         sample.reordered = previousHigh > seq;
+        recvStatsOnAdvance(seq, sample.clientRecvNs);
     }
 
-    /** 探测端 RTT 日志：有回显时间戳时拆分 out（去程）/ echo（回显处理）/ ret（回程）。 */
-    private static String formatEchoRttLog(int seq, ProbeSample sample, double rttMs) {
-        String base = "echo seq=" + seq + " rtt=" + String.format(Locale.US, "%.1f", rttMs) + "ms";
-        if (sample.serverRecvNs <= 0 || sample.serverSendNs <= 0) {
-            return base;
+    private void recvStatsOnAdvance(int seq, long nowNs) {
+        ProbeRecvStats stats = activeRecvStats;
+        if (stats != null) {
+            stats.onRecvAdvance(seq, nowNs);
         }
-        double outMs = (sample.serverRecvNs - sample.clientSendNs) / 1_000_000.0;
-        double echoMs = (sample.serverSendNs - sample.serverRecvNs) / 1_000_000.0;
-        double retMs = (sample.clientRecvNs - sample.serverSendNs) / 1_000_000.0;
-        return base
-                + " out=" + String.format(Locale.US, "%.1f", outMs)
-                + " echo=" + String.format(Locale.US, "%.2f", echoMs)
-                + " ret=" + String.format(Locale.US, "%.1f", retMs);
     }
 
     private MqttPacket readPacket() throws Exception {
@@ -394,17 +404,21 @@ final class MqttProbeRunner implements ProbeRunner {
 
     /** 已收到 header 后的后续读：超时重试，避免 100ms soTimeout 中断半包读取。 */
     private int readByteRetry() throws Exception {
-        while (true) {
+        while (running.get()) {
             try {
                 return input.read();
             } catch (java.net.SocketTimeoutException ignored) {
             }
         }
+        return -1;
     }
 
     private void readFully(byte[] buffer, int offset, int length) throws Exception {
         int end = offset + length;
         while (offset < end) {
+            if (!running.get()) {
+                throw new IllegalStateException("MQTT body closed");
+            }
             try {
                 int read = input.read(buffer, offset, end - offset);
                 if (read < 0) {

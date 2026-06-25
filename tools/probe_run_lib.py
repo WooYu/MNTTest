@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe run 校验、过载识别与场景元数据提取（供 post_probe_run / _verify_probe_run 复用）。"""
+"""Probe run 校验、过载识别与场景元数据提取（供 post_probe_run / verify_probe_run 复用）。"""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def load_summary(path: Path) -> dict[str, Any]:
         return json.load(f)
 
 
-def weak_net_line(data: dict[str, Any]) -> str:
+def weak_net_line(data: dict[str, Any], *, empty_label: str = "正常网") -> str:
     wn = data.get("weakNetProfile") or {}
     if not wn or wn.get("tool") in (None, "", "无"):
         parts = []
@@ -49,7 +49,7 @@ def weak_net_line(data: dict[str, Any]) -> str:
             parts.append(f"延迟+{wn['delayMs']}ms")
         if wn.get("jitterMs"):
             parts.append(f"抖动{wn['jitterMs']}ms")
-        return "正常网" if not parts else "，".join(parts)
+        return empty_label if not parts else "，".join(parts)
     parts = [str(wn.get("tool", "无"))]
     if wn.get("lossPercent"):
         parts.append(f"丢包{wn['lossPercent']}%")
@@ -60,6 +60,70 @@ def weak_net_line(data: dict[str, Any]) -> str:
     if wn.get("note"):
         parts.append(str(wn["note"]))
     return "，".join(parts)
+
+
+def weak_net_setting(data: dict[str, Any]) -> dict[str, str]:
+    """提取 Clumsy 注入设定值（丢包% / 延迟ms / 抖动ms）。"""
+    wn = data.get("weakNetProfile") or {}
+    return {
+        "loss": str(wn.get("lossPercent", "") or ""),
+        "delay": str(wn.get("delayMs", "") or ""),
+        "jitter": str(wn.get("jitterMs", "") or ""),
+    }
+
+
+def manifest_row_key(row: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        row.get("scene_id", ""),
+        row.get("abba_round", ""),
+        row.get("run_id", ""),
+    )
+
+
+def upsert_manifest(
+    manifest: Path,
+    row: dict[str, str],
+    *,
+    force_append: bool = False,
+) -> str:
+    """写入场景表。默认按 scene_id+abba_round+run_id 去重覆盖；force_append 时总是追加。
+
+    Returns: \"appended\" | \"updated\" | \"created\"
+    """
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    normalized = {k: row.get(k, "") for k in MANIFEST_HEADERS}
+    key = manifest_row_key(normalized)
+
+    if force_append:
+        write_header = not manifest.is_file()
+        with manifest.open("a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=MANIFEST_HEADERS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(normalized)
+        return "appended"
+
+    existing: list[dict[str, str]] = []
+    replaced = False
+    if manifest.is_file():
+        with manifest.open(newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                item = {k: r.get(k, "") for k in MANIFEST_HEADERS}
+                if manifest_row_key(item) == key:
+                    replaced = True
+                    continue
+                existing.append(item)
+
+    existing.append(normalized)
+    with manifest.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=MANIFEST_HEADERS)
+        writer.writeheader()
+        writer.writerows(existing)
+
+    if replaced:
+        return "updated"
+    return "created" if len(existing) == 1 else "appended"
 
 
 def _pct(vals: list[float], p: float) -> float:

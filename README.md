@@ -10,7 +10,7 @@
 - `docs/`：设计方案、执行手册与开发计划文档。
 - `References/`：对照测试资料与历史脚本（含 `OpenFEC与P2P测试对比_0806.xlsx`、`MqttTestPython/`）。
 - `config/`：测试配置示例（`probe.test.example.json`）。
-- `tools/`：本地构建与验证脚本。
+- `tools/`：本地构建、测后与报告脚本（详见 [`tools/README.md`](tools/README.md)）。
 
 ## 构建 Android App
 

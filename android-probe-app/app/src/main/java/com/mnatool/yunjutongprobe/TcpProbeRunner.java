@@ -1,7 +1,5 @@
 package com.mnatool.yunjutongprobe;
 
-import org.json.JSONObject;
-
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.InputStreamReader;
@@ -24,6 +22,7 @@ final class TcpProbeRunner implements ProbeRunner {
     private final Map<Integer, ProbeSample> samples = new ConcurrentHashMap<>();
     private final AtomicInteger highestReceivedSeq = new AtomicInteger(-1);
     private volatile Socket socket;
+    private volatile ProbeRecvStats activeRecvStats;
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -33,6 +32,7 @@ final class TcpProbeRunner implements ProbeRunner {
         }
         samples.clear();
         highestReceivedSeq.set(-1);
+        activeRecvStats = null;
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -62,32 +62,44 @@ final class TcpProbeRunner implements ProbeRunner {
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             ProbePerfStats perf = new ProbePerfStats(config.pps);
-            for (int seq = 0; seq < config.count && running.get(); seq++) {
+            ProbeRecvStats recvStats = new ProbeRecvStats();
+            activeRecvStats = recvStats;
+            int sentSeq = 0;
+            for (sentSeq = 0; sentSeq < config.count && running.get(); sentSeq++) {
                 long nowNs = System.nanoTime();
+                nextNs = ProbeSendScheduler.capCatchUp(nowNs, nextNs, intervalNs, recvStats);
                 if (nowNs < nextNs) {
                     sleepNs(nextNs - nowNs);
+                }
+                if (recvStats.checkStall(System.nanoTime(), true, sentSeq, callback)) {
+                    recvStats.markPublishStoppedEarly(sentSeq);
+                    callback.onEvent("收包停滞，提前结束发包（已发 " + sentSeq + " / " + config.count + "）");
+                    break;
                 }
 
                 boolean vpnActive = config.vpnActiveAtStart;
                 long sendNs = System.nanoTime();
                 perf.beforeSend(sendNs, nextNs);
                 long sendMs = System.currentTimeMillis();
-                String line = ProbePayloadCodec.buildLine(config, seq, sendNs, sendMs, vpnActive);
+                String line = ProbePayloadCodec.buildLine(config, sentSeq, sendNs, sendMs, vpnActive);
+                boolean compactPayload = ProbePayloadCodec.usesCompactPayload(config);
                 ProbeSample sample = new ProbeSample(
                         config.runId,
-                        seq,
+                        sentSeq,
                         sendNs,
                         sendMs,
                         line.getBytes(StandardCharsets.UTF_8).length,
-                        vpnActive
+                        vpnActive,
+                        compactPayload
                 );
-                samples.put(seq, sample);
+                samples.put(sentSeq, sample);
                 writer.write(line);
                 writer.flush();
                 perf.afterSend();
                 nextNs += intervalNs;
 
                 long metricsNow = System.nanoTime();
+                recvStats.checkStall(metricsNow, true, sentSeq, callback);
                 if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
@@ -98,9 +110,11 @@ final class TcpProbeRunner implements ProbeRunner {
                 callback.onEvent(perf.warningText());
             }
             callback.onPerfStats(perf);
+            callback.onRecvStats(recvStats);
 
             long waitUntilNs = System.nanoTime() + timeoutNs;
             while (running.get() && System.nanoTime() < waitUntilNs) {
+                recvStats.checkStall(System.nanoTime(), false, sentSeq, callback);
                 callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                 if (snapshot(timeoutNs, false).received >= config.count) {
                     break;
@@ -145,11 +159,12 @@ final class TcpProbeRunner implements ProbeRunner {
                     break;
                 }
                 long recvNs = System.nanoTime();
-                JSONObject ack = new JSONObject(line);
-                if (!ack.optString("runId", "").equals(currentRunId())) {
+                long recvMs = System.currentTimeMillis();
+                ProbePayloadCodec.ParsedEcho echo = ProbePayloadCodec.parseEchoPayload(line, currentRunId());
+                if (echo == null) {
                     continue;
                 }
-                int seq = ack.optInt("seq", -1);
+                int seq = echo.seq;
                 ProbeSample sample = samples.get(seq);
                 if (sample == null) {
                     continue;
@@ -159,10 +174,16 @@ final class TcpProbeRunner implements ProbeRunner {
                     continue;
                 }
                 sample.clientRecvNs = recvNs;
-                sample.serverRecvNs = ack.optLong("serverRecvNs", 0);
-                sample.serverSendNs = ack.optLong("serverSendNs", 0);
+                sample.clientRecvMs = recvMs;
+                if (!echo.compact && echo.jsonAck != null) {
+                    ProbeSegmentTiming.applyEchoTimestamps(sample, echo.jsonAck, recvMs);
+                }
                 int previousHigh = highestReceivedSeq.getAndUpdate(old -> Math.max(old, seq));
                 sample.reordered = previousHigh > seq;
+                ProbeRecvStats stats = activeRecvStats;
+                if (stats != null) {
+                    stats.onRecvAdvance(seq, recvNs);
+                }
             } catch (java.net.SocketTimeoutException ignored) {
                 // Continue so stop() can close the socket quickly.
             } catch (Exception exc) {

@@ -90,6 +90,11 @@ final class ProbeStorage {
     }
 
     static File[] writeRun(Context context, ProbeConfig config, ProbeMetrics metrics, List<ProbeSample> samples, ProbePerfStats perf) throws Exception {
+        return writeRun(context, config, metrics, samples, perf, null);
+    }
+
+    static File[] writeRun(Context context, ProbeConfig config, ProbeMetrics metrics, List<ProbeSample> samples,
+            ProbePerfStats perf, ProbeRecvStats recv) throws Exception {
         migrateLegacyIfNeeded(context);
         migrateFlatExportsIfNeeded(context);
         ensureDownloadsDir(context);
@@ -98,7 +103,7 @@ final class ProbeStorage {
         String base = "probe_" + stamp + "_" + config.runId;
 
         String csvContent = buildCsvContent(config, samples);
-        String summaryContent = buildSummaryContent(config, metrics, perf);
+        String summaryContent = buildSummaryContent(config, metrics, perf, recv);
 
         writeDownloadFile(context, base, CSV_NAME, "text/csv", csvContent);
         writeDownloadFile(context, base, SUMMARY_NAME, "application/json", summaryContent);
@@ -527,7 +532,8 @@ final class ProbeStorage {
         return UTF8_BOM + builder;
     }
 
-    private static String buildSummaryContent(ProbeConfig config, ProbeMetrics metrics, ProbePerfStats perf) throws Exception {
+    private static String buildSummaryContent(ProbeConfig config, ProbeMetrics metrics, ProbePerfStats perf,
+            ProbeRecvStats recv) throws Exception {
         JSONObject json = new JSONObject();
         json.put("runId", config.runId);
         json.put("protocol", config.protocol.label);
@@ -560,6 +566,9 @@ final class ProbeStorage {
         json.put("weakNetProfile", config.weakNetProfile.toJson());
         if (perf != null) {
             json.put("perf", perf.toJson());
+        }
+        if (recv != null) {
+            json.put("recv", recv.toJson());
         }
         return json.toString(2);
     }

@@ -1,7 +1,5 @@
 package com.mnatool.yunjutongprobe;
 
-import org.json.JSONObject;
-
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -21,6 +19,7 @@ final class UdpProbeRunner implements ProbeRunner {
     private final Map<Integer, ProbeSample> samples = new ConcurrentHashMap<>();
     private final AtomicInteger highestReceivedSeq = new AtomicInteger(-1);
     private volatile DatagramSocket socket;
+    private volatile ProbeRecvStats activeRecvStats;
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -30,6 +29,7 @@ final class UdpProbeRunner implements ProbeRunner {
         }
         samples.clear();
         highestReceivedSeq.set(-1);
+        activeRecvStats = null;
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -59,30 +59,43 @@ final class UdpProbeRunner implements ProbeRunner {
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             ProbePerfStats perf = new ProbePerfStats(config.pps);
-            for (int seq = 0; seq < config.count && running.get(); seq++) {
+            ProbeRecvStats recvStats = new ProbeRecvStats();
+            activeRecvStats = recvStats;
+            int sentSeq = 0;
+            for (sentSeq = 0; sentSeq < config.count && running.get(); sentSeq++) {
                 long nowNs = System.nanoTime();
+                nextNs = ProbeSendScheduler.capCatchUp(nowNs, nextNs, intervalNs, recvStats);
                 if (nowNs < nextNs) {
                     sleepNs(nextNs - nowNs);
+                }
+                if (recvStats.checkStall(System.nanoTime(), true, sentSeq, callback)) {
+                    recvStats.markPublishStoppedEarly(sentSeq);
+                    callback.onEvent("收包停滞，提前结束发包（已发 " + sentSeq + " / " + config.count + "）");
+                    break;
                 }
 
                 boolean vpnActive = config.vpnActiveAtStart;
                 long sendNs = System.nanoTime();
                 perf.beforeSend(sendNs, nextNs);
-                byte[] payload = ProbePayloadCodec.buildPayload(config, seq, sendNs, System.currentTimeMillis(), vpnActive);
+                long sendMs = System.currentTimeMillis();
+                byte[] payload = ProbePayloadCodec.buildPayload(config, sentSeq, sendNs, sendMs, vpnActive);
+                boolean compactPayload = ProbePayloadCodec.usesCompactPayload(config);
                 ProbeSample sample = new ProbeSample(
                         config.runId,
-                        seq,
+                        sentSeq,
                         sendNs,
-                        System.currentTimeMillis(),
+                        sendMs,
                         payload.length,
-                        vpnActive
+                        vpnActive,
+                        compactPayload
                 );
-                samples.put(seq, sample);
+                samples.put(sentSeq, sample);
                 socket.send(new DatagramPacket(payload, payload.length, address, config.port));
                 perf.afterSend();
                 nextNs += intervalNs;
 
                 long metricsNow = System.nanoTime();
+                recvStats.checkStall(metricsNow, true, sentSeq, callback);
                 if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
@@ -93,9 +106,11 @@ final class UdpProbeRunner implements ProbeRunner {
                 callback.onEvent(perf.warningText());
             }
             callback.onPerfStats(perf);
+            callback.onRecvStats(recvStats);
 
             long waitUntilNs = System.nanoTime() + timeoutNs;
             while (running.get() && System.nanoTime() < waitUntilNs) {
+                recvStats.checkStall(System.nanoTime(), false, sentSeq, callback);
                 callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                 if (snapshotSamples().size() >= config.count && snapshot(timeoutNs, false).received >= config.count) {
                     break;
@@ -140,9 +155,14 @@ final class UdpProbeRunner implements ProbeRunner {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
                 long recvNs = System.nanoTime();
+                long recvMs = System.currentTimeMillis();
                 String text = new String(packet.getData(), packet.getOffset(), packet.getLength(), StandardCharsets.UTF_8);
-                JSONObject ack = new JSONObject(text);
-                int seq = ack.optInt("seq", -1);
+                String runId = currentRunId();
+                ProbePayloadCodec.ParsedEcho echo = ProbePayloadCodec.parseEchoPayload(text, runId);
+                if (echo == null) {
+                    continue;
+                }
+                int seq = echo.seq;
                 ProbeSample sample = samples.get(seq);
                 if (sample == null) {
                     continue;
@@ -152,16 +172,29 @@ final class UdpProbeRunner implements ProbeRunner {
                     continue;
                 }
                 sample.clientRecvNs = recvNs;
-                sample.serverRecvNs = ack.optLong("serverRecvNs", 0);
-                sample.serverSendNs = ack.optLong("serverSendNs", 0);
+                sample.clientRecvMs = recvMs;
+                if (!echo.compact && echo.jsonAck != null) {
+                    ProbeSegmentTiming.applyEchoTimestamps(sample, echo.jsonAck, recvMs);
+                }
                 int previousHigh = highestReceivedSeq.getAndUpdate(old -> Math.max(old, seq));
                 sample.reordered = previousHigh > seq;
+                ProbeRecvStats stats = activeRecvStats;
+                if (stats != null) {
+                    stats.onRecvAdvance(seq, recvNs);
+                }
             } catch (Exception exc) {
                 if (running.get()) {
                     callback.onEvent("接收异常: " + exc.getMessage());
                 }
             }
         }
+    }
+
+    private String currentRunId() {
+        for (ProbeSample sample : samples.values()) {
+            return sample.runId;
+        }
+        return "";
     }
 
     private ProbeMetrics snapshot(long timeoutNs, boolean finalResult) {
