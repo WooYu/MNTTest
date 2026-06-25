@@ -1,6 +1,6 @@
 # 云聚通 Probe 网络测试执行手册
 
-> **结论归档：** [云聚通 Probe 测试结论（飞书）](https://q00enigbkuh.feishu.cn/wiki/Q5bLwZmMJi5ZvDk6H4icFEYCnxf)
+> **结论归档：** [云聚通 Probe 测试结论（飞书）](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)
 
 双 Android 平板 + MQTT Probe，验证云聚通对中转链路的加速效果，复刻飞书《测试记录 v2.0》记录 1/2。指标以应用层往返为准，ABBA 四轮抵消时段波动。
 
@@ -234,7 +234,9 @@ App 弱网 Profile 与 Clumsy 保持一致；备注写明场景 ID（`R2-single`
 | `lossRate` | 测试结束时仍未收到回显的 seq 占比（非链路丢包率） | 有效轮应为 0% | 常仍为 **0%**（TCP 重传后收齐）；勿与 Clumsy 10% 硬比 |
 | `avgRttMs` | 仅对已收包 RTT 均值 | 参考 | 参考 |
 | **`p95RttMs` / `p99RttMs`** | 尾延迟 | 加速核心（广州） | **弱网 ABBA 主结论** |
-| `jitterMs` | 相邻收包 RTT 差绝对值均值 | 辅 | 辅 |
+| `p50RttMs` | 中位 RTT | 参考 | 判过载 vs 弱网（p50 是否稳定） |
+| **p99/p50** | 尾延迟倍率（`p99RttMs ÷ p50RttMs`） | 辅 | **弱网主表/报告列**（典型 3～6×） |
+| `jitterMs` | 相邻收包 RTT 差绝对值均值 | 辅（报告主表已移除） | 辅 |
 | `maxBurstLoss` | 最长连续未收段 | 应为 0 | 应为 0；若等于 `lost` 且丢包集中在末 seq → 早停假象 |
 | `perf.belowTarget` | 实际 PPS < 目标×95% | 可接受若收齐 | 同左 |
 | `recv.recvStallDetected` | 收包停滞 ≥8s | 出现则无效 | **可告警**；`stallPolicy=weak_net_warn_only` 时不停发，须 `sent=Count` |
@@ -314,7 +316,7 @@ python tools\run_abba_report.py `
 **R2 结果怎么看（有效数据前提下）：**
 
 1. **有效性：** `received=sent=100000`；`recv.publishStoppedEarly=false`；`maxBurstLoss=0`；无 p95 随 seq 单调飙至数秒。
-2. **主指标：** `p95RttMs`、`p99RttMs`（报告中的 B 组相对 A 组）；辅以 `jitterMs`、RTT>500 ms / >1 s 占比（可从 `samples.csv` 统计）。
+2. **主指标：** `p95RttMs`、`p99RttMs`（报告中的 B 组相对 A 组）；主表另列 `p50RttMs`、**p99/p50**；RTT>500 ms / >1 s 占比可从 `samples.csv` 统计。
 3. **辅指标：** `lossRate` 保持 0% 即可；**不要**要求等于 Clumsy 10%。
 4. **报告：** `run_abba_report.py` 含「弱网设定 vs 实测」表——实测丢包列仅作参考，**以 p95/p99 判加速效果**。
 
@@ -420,6 +422,7 @@ test-runs/
 | 脚本索引 | `tools/README.md` |
 | App 使用 | `android-probe-app/README.md` |
 | 总体设计 | `docs/云聚通Android网络测试工具设计.md` |
+| **结论归档** | [飞书《测试 v3.0-App Probe》](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae) |
 | 业务记录 | [飞书《测试记录 v2.0》](https://q00enigbkuh.feishu.cn/wiki/WlqwwWRnpiLJ2fkSDWmc9P20nJg) |
 
 ---

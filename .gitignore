@@ -29,6 +29,22 @@ tools/_live_logs/
 tools/_pull_*/
 tools/__pycache__/
 
+# 飞书同步本地缓存与调试产物（链接见 feishu_doc_config.py）
+tools/_feishu_blocks/
+tools/_feishu_*.json
+tools/_feishu_*.xml
+tools/_feishu_*.txt
+tools/_feishu_*.ps1
+tools/_fetch_*.json
+tools/_verify*.json
+tools/_verify*.md
+tools/_block_ids*.txt
+tools/_doc_head.txt
+tools/_sec_r2.json
+tools/_parse_blocks.py
+tools/_parse_doc_ids.py
+tools/_insert_drop_test.py
+
 # Agent / scratch (勿提交)
 tmp_*
 wiki_params.json

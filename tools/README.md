@@ -174,6 +174,28 @@ flowchart LR
 
 ---
 
+### 飞书结论归档
+
+结论 Wiki 链接统一维护于 [`feishu_doc_config.py`](feishu_doc_config.py)（当前：[测试 v3.0-App Probe](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)）。测后 ABBA 报告生成后，可用下列脚本同步表格到飞书：
+
+| 脚本 | 说明 |
+| --- | --- |
+| [`gen_feishu_blocks.py`](gen_feishu_blocks.py) | 从 `test-runs/` 生成飞书 docx XML 块（`_feishu_blocks/`） |
+| [`push_feishu_doc.py`](push_feishu_doc.py) | 将 XML 块推送到结论 Wiki（需 `lark-cli` 已登录） |
+| [`push_r1_table.py`](push_r1_table.py) | 仅更新 R1 结论表 |
+| [`run_abba_report.py`](run_abba_report.py) | 本地 ABBA Markdown；输出含「飞书结论句」可复制段 |
+
+```powershell
+# 生成 + 推送（示例）
+python tools/gen_feishu_blocks.py
+python tools/push_feishu_doc.py --dry-run   # 预览
+python tools/push_feishu_doc.py             # 实际上传
+```
+
+`_feishu_blocks/`、`_feishu_*.json` 等为本地缓存/调试产物，勿提交仓库。
+
+---
+
 ## 已移除的脚本
 
 以下脚本已合并或淘汰，勿再引用：

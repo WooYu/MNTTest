@@ -20,11 +20,32 @@ from probe_run_lib import weak_net_line, weak_net_setting
 METRICS = [
     ("lossRate", "丢包率", True),
     ("avgRttMs", "Avg RTT (ms)", True),
+    ("p50RttMs", "P50 RTT (ms)", True),
     ("p95RttMs", "P95 RTT (ms)", True),
     ("p99RttMs", "P99 RTT (ms)", True),
-    ("jitterMs", "Jitter (ms)", True),
     ("maxBurstLoss", "最大连续丢包", True),
 ]
+
+
+def tail_ratio(data: dict[str, Any]) -> float | None:
+    p50 = float(data.get("p50RttMs", 0))
+    p99 = float(data.get("p99RttMs", 0))
+    if p50 <= 0:
+        return None
+    return p99 / p50
+
+
+def avg_tail_ratio(runs: list[dict[str, Any]]) -> float | None:
+    ratios = [tail_ratio(r) for r in runs]
+    values = [r for r in ratios if r is not None]
+    return avg(values) if values else None
+
+
+def fmt_tail_ratio(data: dict[str, Any]) -> str:
+    ratio = tail_ratio(data)
+    if ratio is None:
+        return "-"
+    return f"{ratio:.1f}×"
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -107,14 +128,17 @@ def build_report(
     lines.append("")
     lines.append("## 运行概览")
     lines.append("")
-    lines.append("| 轮次 | runId | modeTag | protocol | vpnActive | sent | lossRate | p95 | p99 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "| 轮次 | runId | modeTag | protocol | vpnActive | sent | lossRate | p50 | p95 | p99 | p99/p50 |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for label, data in [("A1", a1), ("B1", b1), ("B2", b2), ("A2", a2)]:
         lines.append(
             f"| {label} | {data.get('runId', '-')} | {data.get('modeTag', '-')} | "
             f"{data.get('protocol', '-')} | {data.get('vpnActiveAtStart', '-')} | "
             f"{data.get('sent', '-')} | {fmt(data.get('lossRate'))} | "
-            f"{fmt(data.get('p95RttMs'), 1)} | {fmt(data.get('p99RttMs'), 1)} |"
+            f"{fmt(data.get('p50RttMs'), 1)} | {fmt(data.get('p95RttMs'), 1)} | "
+            f"{fmt(data.get('p99RttMs'), 1)} | {fmt_tail_ratio(data)} |"
         )
 
     lines.append("")
@@ -131,19 +155,18 @@ def build_report(
     if has_weak:
         a_loss_pct = avg([float(r.get("lossRate", 0)) for r in a_runs]) * 100
         b_loss_pct = avg([float(r.get("lossRate", 0)) for r in b_runs]) * 100
-        a_jit = avg([float(r.get("jitterMs", 0)) for r in a_runs])
-        b_jit = avg([float(r.get("jitterMs", 0)) for r in b_runs])
+        a_tail = avg_tail_ratio(a_runs)
+        b_tail = avg_tail_ratio(b_runs)
         a_rtt = avg([float(r.get("avgRttMs", 0)) for r in a_runs])
         b_rtt = avg([float(r.get("avgRttMs", 0)) for r in b_runs])
         set_loss = f"{setting['loss']}%" if setting["loss"] else "—"
-        set_jit = f"{setting['jitter']} ms" if setting["jitter"] else "—"
         set_delay = f"+{setting['delay']} ms" if setting["delay"] else "—"
         lines.append("")
         lines.append("## 弱网设定 vs 实测对照")
         lines.append("")
         lines.append(
             "> 设定 = Clumsy 注入值；实测 = 探测端往返统计。丢包率变化按百分点(pp)；"
-            "时延注入体现在 RTT 增量（双平板含四段中转，仅供趋势参考）。"
+            "MQTT 下 lossRate 常被 TCP 重传掩盖，尾延迟以 p99/p50 为主判据。"
         )
         lines.append("")
         lines.append("| 指标 | Clumsy 设定 | 加速前实测 (A 组) | 加速后实测 (B 组) | A→B 变化 |")
@@ -152,8 +175,15 @@ def build_report(
             f"| 丢包率 | {set_loss} | {a_loss_pct:.2f}% | {b_loss_pct:.2f}% | "
             f"{b_loss_pct - a_loss_pct:+.2f} pp |"
         )
+        a_tail_s = f"{a_tail:.1f}×" if a_tail is not None else "-"
+        b_tail_s = f"{b_tail:.1f}×" if b_tail is not None else "-"
+        tail_delta = (
+            f"{b_tail - a_tail:+.1f}×"
+            if a_tail is not None and b_tail is not None
+            else "-"
+        )
         lines.append(
-            f"| 抖动 | {set_jit} | {a_jit:.1f} ms | {b_jit:.1f} ms | {b_jit - a_jit:+.1f} ms |"
+            f"| p99/p50 | — | {a_tail_s} | {b_tail_s} | {tail_delta} |"
         )
         lines.append(
             f"| 时延 (RTT 参考) | {set_delay} | {a_rtt:.0f} ms | {b_rtt:.0f} ms | "
@@ -175,6 +205,15 @@ def build_report(
         imp_str = f"{imp:+.1f}%" if imp is not None else "-"
         lines.append(f"| {label} | {fmt(a_val)} | {fmt(b_val)} | {imp_str} |")
 
+    a_tail = avg_tail_ratio(a_runs)
+    b_tail = avg_tail_ratio(b_runs)
+    tail_imp = pct_improve(a_tail, b_tail, True) if a_tail is not None and b_tail is not None else None
+    improvements["p99/p50"] = tail_imp
+    tail_imp_str = f"{tail_imp:+.1f}%" if tail_imp is not None else "-"
+    a_tail_s = f"{a_tail:.2f}×" if a_tail is not None else "-"
+    b_tail_s = f"{b_tail:.2f}×" if b_tail is not None else "-"
+    lines.append(f"| p99/p50 | {a_tail_s} | {b_tail_s} | {tail_imp_str} |")
+
     v = verdict(improvements)
     if not valid:
         v = "数据无效"
@@ -195,18 +234,26 @@ def build_report(
     wn = weak_net_line(a1, empty_label="无")
     loss_imp = improvements.get("lossRate")
     p95_imp = improvements.get("p95RttMs")
+    tail_imp = improvements.get("p99/p50")
     a_loss = avg([float(r.get("lossRate", 0)) for r in a_runs]) * 100
     b_loss = avg([float(r.get("lossRate", 0)) for r in b_runs]) * 100
     a_p95 = avg([float(r.get("p95RttMs", 0)) for r in a_runs])
     b_p95 = avg([float(r.get("p95RttMs", 0)) for r in b_runs])
+    a_tail = avg_tail_ratio(a_runs)
+    b_tail = avg_tail_ratio(b_runs)
     loss_imp_s = f"{loss_imp:+.1f}%" if loss_imp is not None else "N/A(基线为0)"
     p95_imp_s = f"{p95_imp:+.1f}%" if p95_imp is not None else "-"
+    tail_imp_s = f"{tail_imp:+.1f}%" if tail_imp is not None else "-"
+    a_tail_s = f"{a_tail:.1f}×" if a_tail is not None else "-"
+    b_tail_s = f"{b_tail:.1f}×" if b_tail is not None else "-"
     lines.append(
         f"{scene} / {proto} / 弱网:{wn}："
         f"加速组相对基线，丢包率 {a_loss:.2f}% → {b_loss:.2f}%"
         f"（改善 {loss_imp_s}），"
         f"p95 {a_p95:.0f}ms → {b_p95:.0f}ms"
-        f"（改善 {p95_imp_s}）。"
+        f"（改善 {p95_imp_s}），"
+        f"p99/p50 {a_tail_s} → {b_tail_s}"
+        f"（改善 {tail_imp_s}）。"
         f"Verdict: {v}。"
     )
     lines.append("```")
