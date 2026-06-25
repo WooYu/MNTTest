@@ -6,8 +6,8 @@
 - App 功能或探测逻辑变更时，应同步更新测试文档（如 `docs/云聚通Probe网络测试执行手册.md`）。
 - 平板性能不足导致 PPS/时延异常时，需在 App 日志或 UI 中可辨识，便于调参排查。
 - 测后处理流程（拉取、校验、归档、场景表、过载检测）希望用脚本一条命令自动完成，而非手动逐步操作。
-- 测试执行顺序：先只测 MQTT；主测 **实验室十万级 @ 2000pps**（不测现场千级）；同档位内弱网 ABBA（基线/加速）→正常网 ABBA，而非跨场景「先全弱网、再全加速、再全未加速」的分组批次。
-- Clumsy 弱网：参数页弱网模拟工具默认选 Clumsy；MQTT 往返须 Inbound+Outbound 双向勾选；单变量分档优先（丢包/时延分开），Clumsy 无原生抖动、抖动留 0；测后 ABBA/分组报告需对照 Clumsy 设定与加速前后实测丢包/抖动；链路层丢包在 MQTT(TCP) 上可能被重传掩盖、App 丢包 0% 时以 p95/p99 尾延迟为主判据。
+- 测试执行顺序：先只测 MQTT；主测 **实验室十万级 @ 2000pps**（不测现场千级）；R2 弱网只测 **双通道**（R2-dual-*，探测+回显双端 Clumsy），Broker 固定 **广州测试**；同档位内弱网 ABBA（基线/加速）→正常网 ABBA，而非跨场景「先全弱网、再全加速、再全未加速」的分组批次。
+- Clumsy 弱网：参数页弱网模拟工具默认选 Clumsy；MQTT 往返须 Inbound+Outbound 双向勾选；单变量分档优先（丢包/时延分开），Clumsy 无原生抖动、抖动留 0；测后 ABBA/分组报告需对照 Clumsy 设定与加速前后实测丢包/抖动；链路层丢包在 MQTT(TCP) 上可能被重传掩盖、App 丢包 0% 时以 **p95/p99 与 p99/p50**（越小越好，弱网典型 3～6×）为主判据。
 - 与 Autel 联调 App 对标 MQTT 时延：参数页手动 20B（触发 compact）即可，不必单独 Autel preset/场景档；正式弱网 ABBA 主结论用 **LAB 十万级 @ 2000pps / 100B 紧凑包**。
 - 运行页 RTT 图：全览/跟随/细节分段按钮（默认跟随），顶栏迷你全览常驻、底栏丢包色带（绿/黄/红）并入同卡；细节模式才双指缩放，取消双击切换；全览分桶用 Excel 式包络+中位平滑趋势、仅 p50 水位虚线（跟随/细节保留 p99/p95/p50），Y 轴 p99 定标；「RTT 趋势」标题独占固定行、切换页签时图例 INVISIBLE 占位避免遮挡；不得影响 MQTT 探测或主线程卡顿。
 - 运行中支持「取消测试」：停止 Runner 但不导出/不写历史，直接回参数页（与「停止并查看结果」区分）。
@@ -18,7 +18,7 @@
 - MNATool 为云聚通网络探测工具 monorepo，主要含 `android-probe-app/`、`docs/`、`tools/`。
 - Android 探针包名 `com.mnatool.yunjutongprobe`，源码在 `android-probe-app/app/src/main/java/com/mnatool/yunjutongprobe/`。
 - 探测参数双档预设：`FIELD` 现场千级（1000/10pps/200B/5000ms）、`LAB` 实验室十万级（100000/2000pps/100B/60000ms），定义于 `ProbeDefaults.java`（VERSION=4；旧版 LAB 500/2000pps+1000B 自动迁移为 2000pps/100B）。
-- MQTT 主测：执行手册以双平板验证飞书《测试记录 v2.0》记录 1/2 为主线，场景 R1（中转矩阵）/ R2（弱网矩阵），档位 **实验室十万级 @ 2000pps**；主结论归档 [飞书 Wiki O7YP…](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)；见 `docs/云聚通Probe网络测试执行手册.md`。
+- MQTT 主测：执行手册以双平板验证飞书《测试记录 v2.0》为主线，场景 R1（中转矩阵）/ R2（弱网矩阵，含 R2-dual-drop10/20/30 等 drop 分档），档位 **实验室十万级 @ 2000pps**；Wiki 链接单一来源 `tools/feishu_doc_config.py`（结论 `FEISHU_CONCLUSION_DOC`、记录模板 `FEISHU_TEST_RECORD_V2`）；主结论归档 [飞书 Wiki O7YP…](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)，由 `gen_feishu_blocks.py` + `push_feishu_doc.py` 从 `test-runs/` 同步（场景中文 `SCENE_DISPLAY`；主表 **p50/p99/p50**，不含 jitterMs；A→B 对比列改善绿/变差红）；见 `docs/云聚通Probe网络测试执行手册.md`。
 - 构建工具链：JDK 17、AGP 9.0.1、Gradle 9.3.0；Gradle 分发目录 `D:\jobs\gradle`，可用 `tools/build_android_probe.ps1` 编译安装。
 - 典型测试环境：MaxiSys Ultra S2 西安双机（`50f08d16` 探测 / `a4fbf4e7` 回显）；App 默认西安 Broker，主结论对齐业务路径用广州/广州测试。
 - UI 布局分档见 `TabletLayout.java`：`TABLET`（≥720dp 宽）、`TABLET_XL`（≥1100dp 宽，含 MaxiSys Ultra S2 横屏）；宽屏运行页状态/指标/概览顶部全宽，下分左右栏（左 RTT 图含底栏丢包色带、右逐包记录顶对齐）。
