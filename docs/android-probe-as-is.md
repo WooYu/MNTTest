@@ -30,26 +30,28 @@
 
 | 子包 | 典型类 |
 |------|--------|
-| （根） | `MainActivity` |
+| （根） | `MainActivity`（~44 行生命周期壳） |
 | `ui` | `ProbeUiCoordinator`、`ProbeRunContext` |
-| `ui.config` / `ui.running` / `ui.result` / `ui.history` | 各页 Controller + Views |
-| `ui.common` / `ui.chart` | `ProbeViewFactory`、`TabletLayout`、`MetricsChartView` |
+| `ui.config` / `ui.running` / `ui.result` / `ui.history` | 各页 Controller + Views + `ProbeConfigStore` |
+| `ui.common` / `ui.chart` | `ProbeViewFactory`、`TabletLayout`、`ConfigSummaryUi`、`MetricsChartView` |
 | `session` | `ProbeFlowState`、`ProbeSessionCoordinator` |
-| `runner` / `runner.mqtt` | `*ProbeRunner`、`MqttTokenProvider` |
+| `runner` / `runner.mqtt` | `*ProbeRunner`、`ProbeRecvStats`、`MqttTokenProvider` |
 | `model` / `metrics` / `codec` / `storage` / `util` | 配置 DTO、指标、payload、导出、常量 |
+
+> **包迁移**：已完成；根包仅保留 `MainActivity` 生命周期壳，其余类均在子包（`migrate_packages.py` 为一次性迁移脚本，勿重复执行）。
 
 MQTT 探测/回显为运行时角色（`ProbeConfig.Role`），不按子包拆分。
 
 ```mermaid
 flowchart TB
-    MA["MainActivity<br/>~40 行生命周期壳"]
+    MA["MainActivity<br/>生命周期壳"]
     UIC["ProbeUiCoordinator<br/>三页编排 + Runner"]
   CP["ConfigPageController"]
   RP["RunningPageController"]
   ResP["ResultPageController"]
   HP["HistoryPageController"]
+    SC["ProbeSessionCoordinator<br/>停止/取消 + 结束路径"]
     FS["ProbeFlowState<br/>三页状态机"]
-    SC["ProbeSessionCoordinator"]
     PR["ProbeRunner"]
     UDP["UdpProbeRunner"]
     TCP["TcpProbeRunner"]
@@ -63,6 +65,7 @@ flowchart TB
     UIC --> CP & RP & ResP & HP
     UIC --> SC
     SC --> FS
+    RP --> SC
     UIC --> PR
     PR --> UDP & TCP & MQTTP & MQTTR
     MQTTP & UDP & TCP --> MC
@@ -73,11 +76,13 @@ flowchart TB
 
 | 模块 | 职责 |
 |------|------|
-| `MainActivity` | Activity 生命周期壳（`onCreate` / `onDestroy` / 权限 / 返回键） |
-| `ProbeUiCoordinator` | 页面容器、Controller 接线、MQTT Token 预取、跨页状态 `ProbeRunContext` |
+| `MainActivity` | Activity 生命周期壳（`onCreate` / `onDestroy` / 权限 / 返回键），委托 `ProbeUiCoordinator` |
+| `ProbeUiCoordinator` | 页面容器、Controller 接线、MQTT Token 预取、步骤徽章、权限回调 |
+| `ProbeRunContext` | 跨页共享：`runner`、`pendingExportKind`、指标快照、对比基线等 |
+| `ProbeSessionCoordinator` | 无 Android 依赖；`stopRequested`/`cancelRequested` + `onRunnerFinished`/`onRunnerFailed` 解析 |
 | `ConfigPageController` + `ProbeConfigStore` | 参数页 UI、SharedPreferences、校验与 `startProbe` |
 | `RunningPageController` | 运行监测 UI、指标/图表刷新、停止/取消/待确认完成 |
-| `ResultPageController` | 结果展示、导出、加速对比 UI |
+| `ResultPageController` + `ProbeAccelCompare` | 结果展示、导出、加速对比判决与文案 |
 | `HistoryPageController` | 历史列表/详情 overlay |
 | `ProbeViewFactory` | 纯 Java View 工厂（dp/panel/button/text 等） |
 | `ProbeFlowState` | CONFIG / RUNNING / RESULT + awaitingConfirm |
@@ -128,6 +133,12 @@ flowchart TB
 - 所有 `ProbeCallback` 在 UI 线程先检查 `flow.accepts(runId)`
 - `finish` / `completePending` 成功后清空 `activeRunId`，后续回调一律忽略
 
+### 3.5 UI 导航
+
+- **无顶部步骤条**；左上角固定**圆形步骤徽章**（序号 1–3），点击弹出三页流程说明。
+- 内容区按 `TabletLayout.stepBadgeClearanceDp` 为徽章留白；运行页保留「当前配置」摘要卡。
+- 历史记录为参数页次级入口（overlay），不破坏三页主流程。
+
 ---
 
 ## 4. 开始测试链路（`startProbe`）
@@ -174,7 +185,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    participant UI as MainActivity
+    participant UI as ProbeUiCoordinator
     participant R as ProbeRunner
     participant Net as 网络/Broker
 
@@ -217,7 +228,7 @@ sequenceDiagram
 
 1. `Socket` 连接 + `BufferedReader` 按行读回显
 2. 发包/收包逻辑同 UDP 调度与停滞策略
-3. **特殊**：`receiveLoop` 中 `readLine()==null` 时 `running.set(false)` 静默结束，**不抛异常** → 走 `onFinished` 而非 `onFailed`（见问题清单）
+3. **特殊**：`receiveLoop` 中 `readLine()==null` 时写入 `receiverFailure`（对端断连）→ finally 走 `onFailed`；尾包等待循环亦检查 `receiverFailure`，断连后不再空等满 timeout
 
 ### 5.4 MQTT 探测端（`MqttProbeRunner`）
 
@@ -236,7 +247,7 @@ sequenceDiagram
 3. `stampEchoOnce` 打戳后转发对端 topic
 4. 按配置决定是否写 `EchoRecord`（高 PPS 跳过）
 5. `onEchoRecords` 回传列表；`onFinished` 样本列表为空（指标用 received/echoed 计数）
-6. **finally 顺序问题**：先 `closeSocket` 再 `sendDisconnect`（见问题清单）
+6. **finally**：先 `sendDisconnect` 再 `closeSocket`（B4 已修复）
 
 ---
 
@@ -332,13 +343,15 @@ Compact 格式：`{sendMs},{seq},AAA…`（Autel 联调兼容）；回显端原�
 
 找不到 → 退回会话内 `prevMetrics` vs 当前（`updateCompare`）。
 
-判决阈值（`renderAccelCompare` / `updateCompare`，逻辑重复）：
+判决阈值（`ProbeAccelCompare.computeVerdict`，`ResultPageController` 仅负责展示）：
 
 - 样本 < 50：样本不足
 - loss/p95/p99 恶化 > 10%：负向
 - loss ≤ -50% 或 p95 ≤ -10% 且 p99 ≤ 10%：明显改善
 - avg/p95/loss 任一改善 > 5%：部分改善
 - 否则：无明显效果
+
+对比 UI 展示 Avg/P95/P99/丢包改善率；**不含 p50 改善率**（主结论以飞书主表 p50/p99/p50 为准，见执行手册归档流程）。
 
 ---
 
@@ -353,10 +366,9 @@ Compact 格式：`{sendMs},{seq},AAA…`（Autel 联调兼容）；回显端原�
 | 鉴权失败 | — | onFailed (SecurityException) | 同左 |
 | 运行中 IO 错误 | onFailed | 断连→停发→onFinished* | onFailed |
 | 用户 stop | onFinished(STOPPED) | 同左 | 同左 |
-| TCP 服务端关连接 | onFinished** | — | — |
+| TCP 服务端关连接 | onFailed | — | — |
 
-\* MQTT 断连时 `failure` 可能为 null，仍走 `onFinished`  
-\*\* 不区分正常/异常结束（问题）
+\* MQTT 断连时 `failure` 可能为 null，仍走 `onFinished`
 
 ### 9.2 UI 文案（`ProbeErrorMessage`）
 
@@ -373,12 +385,12 @@ Compact 格式：`{sendMs},{seq},AAA…`（Autel 联调兼容）；回显端原�
 ### 9.3 权限与导出
 
 - Android ≤9 需 `WRITE_EXTERNAL_STORAGE`
-- `ensureStoragePermission(true)` 设置 `pendingExportAfterPermission`
-- 授权回调**仅**调用 `exportLastRun`，不回显端 `exportEchoRun`（问题）
+- 缺权限时 `ProbeRunContext.pendingExportKind` 记为 `PENDING_EXPORT_PROBE` 或 `PENDING_EXPORT_ECHO`
+- `ProbeUiCoordinator.onRequestPermissionsResult` 授权后按 kind 分别调用 `exportLastRun` / `exportEchoRun`
 
 ### 9.4 生命周期
 
-- `onDestroy`：`runner.stop()` 但不取消 UI 回调；Activity 销毁后 `runOnUiThread` 可能操作已销毁 View（潜在崩溃）
+- `ProbeUiCoordinator.onDestroy`：`runner.stop()` → `runner = null`；取消 MQTT Token 预取 Handler，避免销毁后 UI 回调
 
 ---
 
@@ -393,88 +405,59 @@ Compact 格式：`{sendMs},{seq},AAA…`（Autel 联调兼容）；回显端原�
 | 高 PPS 回显 | 不落 echo seq；Responder 双线程+背压队列 |
 | 自然完成未点查看 | 不导出（仍在 awaitingConfirm） |
 | 失败零样本 | 不进有效对比；导出按钮禁用 |
-| VPN 检测 | 仅起测快照；无法检测「VPN 存在但流量未走 VPN」 |
+| VPN 检测 | 仅起测快照 `vpnActiveAtStart`；无法检测「VPN 存在但流量未走 VPN」；正式 ABBA 由执行手册人工核对 VPN 开关 |
+| 历史 CSV 回放 | `ProbeCsvReader` 仅还原 RTT（历史页 RTT 图）；不还原 `serverRecvNs/serverSendNs`（历史页无分段时延视图） |
+| 加速对比 p50 | 结果页对比卡不含 p50 改善率；`index.json` 已写 `p50RttMs`，主结论见飞书归档 |
+| 导出格式兼容 | App 子目录 `probe_*/{samples,summary}.json`；旧版扁平文件由 `migrateFlatExportsIfNeeded` 与 `tools/probe_run_lib` 双路径识别 |
 | Compact 最小包 | UI/构建最小 20B |
 | 图表手势中 | 暂停数据刷新，避免主线程卡顿 |
 
 ---
 
-## 11. 已发现问题清单（代码审查）
+## 11. 已关闭问题清单（归档）
 
-按严重程度排序，供后续 Plan 修复。
+Spec-Kit 增量重构期间发现并修复的问题，供追溯；**当前无待修复项**。
 
-### P0 — 影响测试结论或数据正确性
+| ID | 问题 | 修复摘要 |
+|----|------|----------|
+| **B1** | MQTT 断连后尾包等待未检查 `mqttConnectionLost` | 尾等循环加 `!mqttConnectionLost` 守卫 |
+| **B2** | `metricsFromRecord` 硬编码 `p50RttMs=0` | 从 `ProbeRunRecord` 读取 |
+| **B3** | `index.json` 缺 `p50RttMs`、`weakNetSummary` | `ProbeStorage` 写入 |
+| **B4** | 回显端 `finally` 先 `closeSocket` 再 `sendDisconnect` | 调整顺序 |
+| **B5** | 存储权限回调只补探测端导出 | 按 `pendingExportKind` 分流 |
+| **B6** | TCP `readLine()==null` 静默结束 | `receiverFailure` → `onFailed`（`TcpProbeRunnerTest`） |
+| **B7** | `MainActivity` ~4100 行耦合 | `ProbeUiCoordinator` + 分页 Controller |
+| **B8** | 对比判决逻辑重复 | 集中于 `ProbeAccelCompare` |
+| **B9** | `onDestroy` 停 Runner 但不注销回调 | `runner = null` + 取消 Token Handler |
+| **B10** | `requestStop` 未使用变量 | 停止标志迁至 `ProbeSessionCoordinator` |
 
-| ID | 问题 | 位置 | 影响 | 状态 |
-|----|------|------|------|------|
-| **B1** | MQTT 断连后尾包等待循环未检查 `mqttConnectionLost` | `MqttProbeRunner.runInternal` | 可空等满 timeoutMs | **已修复** |
-| **B2** | `metricsFromRecord` 将 `p50RttMs` 硬编码为 0 | `MainActivity` | 历史对比 P50 错误 | **已修复** |
-| **B3** | `index.json` 缺 `p50RttMs`、`weakNetSummary` | `ProbeStorage` | 弱网配对误匹配 | **已修复** |
-
-### P1 — 功能缺陷
-
-| ID | 问题 | 位置 | 影响 | 状态 |
-|----|------|------|------|------|
-| **B4** | 回显端 `finally` 先 `closeSocket` 再 `sendDisconnect` | `MqttResponderRunner` | Broker 异常断开 | **已修复** |
-| **B5** | 存储权限回调只补探测端导出 | `MainActivity` | 回显端授权后需手重试 | **已修复** |
-| **B6** | TCP `readLine()==null` 静默结束 | `TcpProbeRunner.receiveLoop` | 对端断连走 `onFailed`；`receiverFailure` + finally 守卫 | **已修复**（`TcpProbeRunnerTest.peerCloseBeforeEchoUsesFailureCallback`） |
-
-### P2 — 可维护性 / 潜在风险
-
-| ID | 问题 | 位置 | 影响 |
-|----|------|------|------|
-| **B7** | ~~`MainActivity` ~4100 行，UI/业务/导出/对比耦合~~ | 全局 | **已修复**（Plan B：`ProbeUiCoordinator` + 分页 Controller） |
-| **B8** | ~~`updateCompare` 与 `renderAccelCompare` 判决逻辑完全重复~~ | `ResultPageController` | **已修复**（逻辑集中于 `ProbeAccelCompare`） |
-| **B9** | ~~`onDestroy` 停 Runner 但不注销回调~~ | `ProbeUiCoordinator` | **已修复**（`runner = null` + 取消 MQTT Token Handler） |
-| **B10** | `requestStop` 中 `runId` 赋值未使用 | `MainActivity` L3152 | 死代码，误导阅读 |
-| **B11** | VPN 仅检测 TRANSPORT_VPN 存在，不验证 Probe 流量是否走 VPN | `VpnState` | 设计文档要求的「冒烟覆盖校验」未完整实现 |
-| **B12** | `ProbeCsvReader` 未还原 `serverRecvNs/serverSendNs` | 读历史 CSV | 历史详情无法重现分段时延 |
-
-### P3 — 与工具链对齐
-
-| ID | 问题 | 说明 |
-|----|------|------|
-| **B13** | tools 旧版扁平 CSV 命名与 App 子目录格式 | 依赖 `migrateFlatExportsIfNeeded` 前置 |
-| **B14** | 飞书主表用 p50/p99/p50，App 对比 UI 不含 p50 改善率 | 与 AGENTS.md 口径部分不一致（index 缺 p50 加剧） |
+未纳入修复的已知限制见 **§10 边界条件速查表**（VPN 快照、历史 CSV 回放口径、p50 对比 UI、导出格式兼容）。
 
 ---
 
-## 12. 现有测试覆盖
+## 12. 单元测试覆盖
 
-| 已有单测 | 覆盖点 |
-|----------|--------|
-| ProbeFlowStateTest | 状态转换、迟到回调 |
+| 单测 | 覆盖点 |
+|------|--------|
+| ProbeFlowStateTest / ProbeSessionCoordinatorTest | 状态转换、停止/取消、迟到回调 |
+| ProbeConfigStoreTest | 参数持久化与校验 |
 | ProbePayloadCodecTest | JSON/Compact 编解码 |
 | MetricsCalculatorTest | finalResult 丢包口径 |
-| ProbeRecvStatsTest | 停滞策略 |
+| ProbeRecvStatsTest | 停滞策略、Broker 断连侧写 |
 | ProbeSendSchedulerTest | catch-up 上限 |
-| MqttProbeRunnerTest | 部分 MQTT 逻辑 |
-| ProbeStorageTest | 导出/索引 |
+| MqttProbeRunnerTest / TcpProbeRunnerTest | MQTT/TCP 关键路径（含 TCP 对端断连） |
+| ProbeStorageTest / ProbeCsvReaderTest | 导出、索引、CSV 回放 |
+| ProbeSegmentTimingTest | 分段时延日志与 JSON 打戳 |
 
-| 缺口 | 建议补充 |
-|------|----------|
-| MainActivity 集成流 | 取消/完成待确认/权限回调 |
-| golden-file | summary.json / csv 格式回归 |
-| MQTT 断连尾等 | B1 回归测试 |
-| TCP 连接关闭 | B6 行为断言 |
+UI 三页流程（取消/待确认/权限回调）依赖手工回归；导出格式由 `ProbeStorageTest` 与 `tools/verify_probe_run.py` 双重校验。
 
 ---
 
-## 13. 后续 Spec-Kit Plan 建议
-
-1. **Plan A（优先）**：修复 P0/P1 问题（B1–B6），每项带 failing test  
-2. ~~**Plan B**：拆 `MainActivity` — 抽出 `ProbeUiCoordinator` / 三页 Builder，不改 Runner~~ **已完成**  
-3. **Plan C**：补齐 index 字段（p50、weakNetSummary），统一对比口径  
-4. **Plan D**：VPN 冒烟校验（对齐设计文档 §5.1）
-
----
-
-## 14. 参考文档
+## 13. 参考文档
 
 | 文档 | 关系 |
 |------|------|
 | [docs/README.md](./README.md) | 文档索引 |
 | [云聚通Android网络测试工具设计.md](./云聚通Android网络测试工具设计.md) | 原始设计意图 |
 | [云聚通Probe网络测试执行手册.md](./云聚通Probe网络测试执行手册.md) | 操作与场景 |
-| [archive/specs/2026-06-21-android-probe-three-page-flow-design.md](./archive/specs/2026-06-21-android-probe-three-page-flow-design.md) | 三页流程设计（已实现，归档） |
 | [AGENTS.md](../AGENTS.md) | 协作约定与特殊逻辑备忘 |

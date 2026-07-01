@@ -26,9 +26,8 @@ flowchart TB
     Manual --> Tools
 ```
 
-- **改 App 逻辑**：先更新 `android-probe-as-is.md`，再同步执行手册与 `AGENTS.md`。
+- **改 App 逻辑**：先更新 `android-probe-as-is.md`，再同步执行手册、`android-probe-app/README.md` 与 `AGENTS.md`。
 - **跑正式测试**：只跟执行手册；指标判读以手册 §2.6、§5 为准。
-- **查历史设计/Plan**：见 [archive/](./archive/)（已实现，仅供追溯）。
 
 ## 外部归档
 

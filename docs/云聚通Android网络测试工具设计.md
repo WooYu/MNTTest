@@ -418,6 +418,12 @@ Excel 的问题不是数据少，而是分析成本高。App 应把数据分三�
 
 当前以 App 实际三页流程为准：参数设置 → 运行状态 → 测试结果（见 `android-probe-app/README.md`）。
 
+**与初稿差异（以实现为准）**：
+
+- 导航为左上角**步骤徽章**（点击看流程说明），非顶部全宽步骤条。
+- 运行页含「当前配置」摘要卡；运行中支持「取消测试」（不导出）与「停止并查看结果」（结算后进结果页）。
+- RTT 图为全览/跟随/细节三档视口 + 底栏丢包色带（详见 As-Is §3.5 与 AGENTS.md）。
+
 ## 12. 报告输出形式
 
 ### 12.1 App 内总结
@@ -448,21 +454,25 @@ Excel 的问题不是数据少，而是分析成本高。App 应把数据分三�
 
 ## 13. 实施分期
 
-### MVP
+### MVP（已交付）
 
-- Android Probe App 支持 MQTT Probe 和 UDP Probe。
+- Android Probe App 支持 **MQTT / TCP / UDP** Probe。
 - 云聚通 Demo App 手工配置 VPN。
-- 现有中转服务器部署 MQTT Echo Responder 和 UDP Echo Sidecar。
-- App 内提供运行页、结果页、CSV/JSON 导出。
+- 现有中转服务器 + 双平板 MQTT 回显模型。
+- 三页流程、实时指标、RTT 图、CSV/JSON 导出、本地历史加速对比。
 
-### V1
+### V1（部分交付）
 
-- 自动 ABBA 测试编排。
-- VPN 覆盖自动校验。
-- 服务端日志回捞。
-- 弱网 Profile 标准化。
+| 项 | 状态 |
+|---|---|
+| 弱网 Profile 标准化（App 内记录 + 执行手册 Clumsy 对齐） | 已交付 |
+| 测后脚本一条命令归档（`post_probe_run.ps1`） | 已交付 |
+| 飞书 Wiki 主结论同步（`gen_feishu_blocks.py`） | 已交付 |
+| 自动 ABBA 测试编排（App 内） | 未做，仍人工按执行手册 |
+| VPN 覆盖自动校验（冒烟 100–200 包） | 未做，仅 `VpnState` 快照（B11） |
+| 服务端日志回捞 | 部分（双机 logcat 手册流程） |
 
-### V2
+### V2（规划中）
 
 - 接入 Linux 网关或软路由自动弱网控制。
 - 场景热力矩阵。
