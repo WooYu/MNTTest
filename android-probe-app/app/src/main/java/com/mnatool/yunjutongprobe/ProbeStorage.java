@@ -224,11 +224,12 @@ final class ProbeStorage {
         try {
             String summaryText = readSummaryText(context, record);
             if (summaryText != null && !summaryText.isEmpty()) {
-                return new JSONObject(summaryText).optInt("timeoutMs", 1500);
+                return new JSONObject(summaryText).optInt("timeoutMs",
+                        ProbeConstants.Timing.LEGACY_SUMMARY_DEFAULT_TIMEOUT_MS);
             }
         } catch (Exception ignored) {
         }
-        return 1500L;
+        return ProbeConstants.Timing.LEGACY_SUMMARY_DEFAULT_TIMEOUT_MS;
     }
 
     private static String readCsvText(Context context, ProbeRunRecord record) throws Exception {
@@ -351,10 +352,12 @@ final class ProbeStorage {
         entry.put("lost", metrics.lost);
         entry.put("lossRate", metrics.lossRate);
         entry.put("avgRttMs", metrics.avgRttMs);
+        entry.put("p50RttMs", metrics.p50RttMs);
         entry.put("p95RttMs", metrics.p95RttMs);
         entry.put("p99RttMs", metrics.p99RttMs);
         entry.put("jitterMs", metrics.jitterMs);
         entry.put("maxBurstLoss", metrics.maxBurstLoss);
+        entry.put("weakNetSummary", config.weakNetProfile.displaySummary());
         return entry;
     }
 
@@ -373,10 +376,12 @@ final class ProbeStorage {
         entry.put("lost", record.lost);
         entry.put("lossRate", record.lossRate);
         entry.put("avgRttMs", record.avgRttMs);
+        entry.put("p50RttMs", record.p50RttMs);
         entry.put("p95RttMs", record.p95RttMs);
         entry.put("p99RttMs", record.p99RttMs);
         entry.put("jitterMs", record.jitterMs);
         entry.put("maxBurstLoss", record.maxBurstLoss);
+        entry.put("weakNetSummary", record.weakNetSummary);
         return entry;
     }
 
@@ -408,10 +413,12 @@ final class ProbeStorage {
                 entry.optInt("lost", 0),
                 entry.optDouble("lossRate", 0),
                 entry.optDouble("avgRttMs", 0),
+                entry.optDouble("p50RttMs", 0),
                 entry.optDouble("p95RttMs", 0),
                 entry.optDouble("p99RttMs", 0),
                 entry.optDouble("jitterMs", 0),
-                entry.optInt("maxBurstLoss", 0)
+                entry.optInt("maxBurstLoss", 0),
+                entry.optString("weakNetSummary", "")
         );
     }
 
@@ -495,6 +502,7 @@ final class ProbeStorage {
                 json.optInt("lost", 0),
                 json.optDouble("lossRate", 0),
                 json.optDouble("avgRttMs", 0),
+                json.optDouble("p50RttMs", 0),
                 json.optDouble("p95RttMs", 0),
                 json.optDouble("p99RttMs", 0),
                 json.optDouble("jitterMs", 0),

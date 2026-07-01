@@ -9,8 +9,8 @@ import java.util.Locale;
  * RTT 仍用本机 nanoTime；分段优先用 wall-clock（clientSendMs ↔ serverRecvMs），避免双机 nanoTime 不可比。
  */
 final class ProbeSegmentTiming {
-    /** 分段之和与 RTT 偏差超过此值时标注不可信。 */
-    private static final double SEGMENT_TOLERANCE_MS = 500.0;
+    /** 分段之和与 RTT 偏差超过此值时标注不可信（单位 ms，见 {@link ProbeConstants.SegmentTiming}）。 */
+    private static final double SEGMENT_TOLERANCE_MS = ProbeConstants.SegmentTiming.RTT_SEGMENT_TOLERANCE_MS;
 
     private ProbeSegmentTiming() {
     }

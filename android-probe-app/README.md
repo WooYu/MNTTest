@@ -2,6 +2,8 @@
 
 这是用于验证腾讯云聚通系统级 VPN/隧道加速效果的 Android MVP。当前支持 UDP Probe、TCP Echo Probe、MQTT Probe 三种协议场景：UDP 用于真实丢包/抖动验证，TCP/MQTT 用于业务协议层 RTT、超时和稳定性验证。
 
+**相关文档：** [docs/README.md](../docs/README.md)（索引）· [android-probe-as-is.md](../docs/android-probe-as-is.md)（实现规格）· [云聚通Probe网络测试执行手册.md](../docs/云聚通Probe网络测试执行手册.md)（现场测试）
+
 ## MVP 功能
 
 - UDP 定频发包到 UDP Echo Sidecar

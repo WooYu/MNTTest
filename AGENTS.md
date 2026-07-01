@@ -3,7 +3,7 @@
 - Android 探针 App 参数页：主操作（「开始测试」）用渐变主按钮、最突出；次级入口（历史记录、说明）权重须明显更低、不与主按钮抢焦点（轻量文字链或标题旁紧凑胶囊均可，形式可微调）。
 - 参数档位（现场千级/实验室十万级）等互斥选项宜用分段选中样式（与测试模式切换一致），而非静态填色按钮；发包数/速率/包大小/超时点击弹出数字输入框（避免平板内联软键盘），速率 1–8000、包大小 1–2000；连接目标端口可留空（UDP 9001 / TCP 9002 / MQTT 1883）。
 - Android 探针 App 导航：去掉顶部步骤条，改用左上角固定步骤徽章（圆形序号，点击弹出流程说明）；运行页须保留「当前配置」摘要卡；布局优先美观可读，不刻意强压一屏；各页关注间距与状态栏/底栏留白。
-- App 功能或探测逻辑变更时，应同步更新测试文档（如 `docs/云聚通Probe网络测试执行手册.md`）。
+- App 功能或探测逻辑变更时，应同步更新测试文档（如 `docs/云聚通Probe网络测试执行手册.md`）与 As-Is Spec（`docs/android-probe-as-is.md`）；理清 android-probe-app 走 Spec-Kit **增量**（反推 Spec → 拆 MainActivity），不全量重写，Runner/Metrics 层保留。
 - 平板性能不足导致 PPS/时延异常时，需在 App 日志或 UI 中可辨识，便于调参排查。
 - 测后处理流程（拉取、校验、归档、场景表、过载检测）希望用脚本一条命令自动完成，而非手动逐步操作。
 - 测试执行顺序：先只测 MQTT；主测 **实验室十万级 @ 2000pps**（不测现场千级）；R2 弱网只测 **双通道**（R2-dual-*，探测+回显双端 Clumsy），Broker 固定 **广州测试**；同档位内弱网 ABBA（基线/加速）→正常网 ABBA，而非跨场景「先全弱网、再全加速、再全未加速」的分组批次。
@@ -15,15 +15,14 @@
 
 ## Learned Workspace Facts
 
-- MNATool 为云聚通网络探测工具 monorepo，主要含 `android-probe-app/`、`docs/`、`tools/`。
-- Android 探针包名 `com.mnatool.yunjutongprobe`，源码在 `android-probe-app/app/src/main/java/com/mnatool/yunjutongprobe/`。
+- MNATool 为云聚通网络探测工具 monorepo，主要含 `android-probe-app/`、`docs/`、`tools/`；构建 JDK 17、AGP 9.0.1、Gradle 9.3.0，Gradle 分发 `D:\jobs\gradle`，可用 `tools/build_android_probe.ps1` 编译安装。
+- Android 探针包名 `com.mnatool.yunjutongprobe`，源码在 `android-probe-app/app/src/main/java/com/mnatool/yunjutongprobe/`；`MainActivity` ~4100 行（UI+编排）是理解成本主因，As-Is Spec（`docs/android-probe-as-is.md`）为流程/边界/异常/特殊逻辑与已知问题（B1–B14）的单一事实来源。
 - 探测参数双档预设：`FIELD` 现场千级（1000/10pps/200B/5000ms）、`LAB` 实验室十万级（100000/2000pps/100B/60000ms），定义于 `ProbeDefaults.java`（VERSION=4；旧版 LAB 500/2000pps+1000B 自动迁移为 2000pps/100B）。
 - MQTT 主测：执行手册以双平板验证飞书《测试记录 v2.0》为主线，场景 R1（中转矩阵）/ R2（弱网矩阵，含 R2-dual-drop10/20/30 等 drop 分档），档位 **实验室十万级 @ 2000pps**；Wiki 链接单一来源 `tools/feishu_doc_config.py`（结论 `FEISHU_CONCLUSION_DOC`、记录模板 `FEISHU_TEST_RECORD_V2`）；主结论归档 [飞书 Wiki O7YP…](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)，由 `gen_feishu_blocks.py` + `push_feishu_doc.py` 从 `test-runs/` 同步（场景中文 `SCENE_DISPLAY`；主表 **p50/p99/p50**，不含 jitterMs；A→B 对比列改善绿/变差红）；见 `docs/云聚通Probe网络测试执行手册.md`。
-- 构建工具链：JDK 17、AGP 9.0.1、Gradle 9.3.0；Gradle 分发目录 `D:\jobs\gradle`，可用 `tools/build_android_probe.ps1` 编译安装。
 - 典型测试环境：MaxiSys Ultra S2 西安双机（`50f08d16` 探测 / `a4fbf4e7` 回显）；App 默认西安 Broker，主结论对齐业务路径用广州/广州测试。
 - UI 布局分档见 `TabletLayout.java`：`TABLET`（≥720dp 宽）、`TABLET_XL`（≥1100dp 宽，含 MaxiSys Ultra S2 横屏）；宽屏运行页状态/指标/概览顶部全宽，下分左右栏（左 RTT 图含底栏丢包色带、右逐包记录顶对齐）。
 - 测后与分析脚本：`tools/post_probe_run.ps1`（+`post_probe_run.py`/`probe_run_lib.py`）一条命令拉取、CSV 校验、归档与场景表/过载检测；`tools/README.md` 索引 `analyze_dual_probe_logs`、`run_abba_report` 等；联调诊断用双机 adb logcat 手动采集（各开一个 PowerShell 窗口，见执行手册「联调诊断」节，已删除 `watch_dual_probe_run.ps1`）：须在仓库根目录执行，测前 `logcat -c`，采到 `test-runs/probe.log` 与 `echo.log`（PowerShell 下 filter 含 `*:S` 须加引号或用 `--%`，否则 0KB），测后 `pull_probe_runs.ps1` 拉导出；自然完成须点「查看测试结果」才导出。
-- 丢包结算改在 `finalResult`（最终结论不在运行中按单包超时计丢，消除长测虚高）；运行中卡片显示「超时丢包率」（仅统计已超 timeout 未收包，与底栏色带一致），结束后改为「丢包率」；手动停止/取消统一等 `onFinished` 结算（`requestStop`/`requestCancel` 不再抢先 `finishRun`）；方向级丢包需回显端记录 echo seq（`EchoRecord`，回显端默认不落 seq）。
+- 丢包结算改在 `finalResult`（最终结论不在运行中按单包超时计丢，消除长测虚高）；运行中卡片显示「超时丢包率」（仅统计已超 timeout 未收包，与底栏色带一致），结束后改为「丢包率」；手动停止/取消统一等 `onFinished` 结算（`requestStop`/`requestCancel` 不再抢先 `finishRun`）；方向级丢包需回显端记录 echo seq（`EchoRecord`）；高 PPS（count≥5万 或 pps≥500）回显端默认不落 seq 以避免 GC。
 - 发包性能统计写入 summary 的 `perf` 字段（检测实际 PPS `belowTarget`）；`summary.json` 含 `recv` 块：正常网收包停滞 ≥8s 告警并提前停发；弱网 Profile 激活时停滞仅告警、发包仍跑满 Count（`stopPublishOnStall=false`/`stallPolicy=weak_net_warn_only`），另对在途包背压（约 8s×PPS）、Broker 断连时停发并跑满 Timeout 走 `onFinished`（`mqttConnectionLost`）；Runner 回调节流 1000ms；运行页图表经 `ScopeViewport` 三档视口（全览/跟随/细节）+ 顶栏迷你全览 + `MetricsChartView` 主图（全览：分桶包络+中位平滑趋势、p50 水位；跟随/细节：p99/p95/p50 参考线）+ 底栏丢包色带，主线程绘制节流（~400ms）、手势期间暂停数据刷新，与 MQTT 线程解耦。
 - 结果页加速对比：按对立 modeTag + 协议/发包数/host/弱网 Profile + Broker(中转) 从本地导出历史自动配对照 run；无匹配时退回会话内上次 vs 本次。
 - MQTT 固定 QoS 0；`readPacket` 超时策略：header 用 100ms 空闲轮询，读到 header 后 body/remaining length 改超时重试；分段 RTT 日志 out/ret 优先 wall-clock（`ProbeSegmentTiming`）；JSON 包 RTT 用本机 nanoTime，compact 包（`packetBytes` 小于 JSON 骨架、UI 最小 20B，`{sendMs},{seq},AAA…` Autel 兼容、回显端原样转发）RTT 用 wall-clock 毫秒；回显端 `stampEchoServerTimes` + 探测端分段日志用于时延定位。

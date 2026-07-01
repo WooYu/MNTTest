@@ -1,6 +1,6 @@
 # tools/ 脚本说明
 
-云聚通 Probe 的 PC 侧构建、测后处理与报告工具。完整测试流程见 [`docs/云聚通Probe网络测试执行手册.md`](../docs/云聚通Probe网络测试执行手册.md)。
+云聚通 Probe 的 PC 侧构建、测后处理与报告工具。完整测试流程见 [docs/README.md](../docs/README.md) 与 [云聚通Probe网络测试执行手册.md](../docs/云聚通Probe网络测试执行手册.md)。
 
 ## 前置条件
 

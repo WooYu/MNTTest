@@ -40,17 +40,6 @@ final class MqttResponderRunner implements ProbeRunner {
     private static final int MQTT_PINGREQ = 12;
     private static final int MQTT_SUBSCRIBE = 8;
     private static final int MQTT_DISCONNECT = 14;
-    /** 联调期：前 N 条逐条记日志，便于确认首包与早期节奏。 */
-    private static final int DETAILED_LOG_MAX_COUNT = 10;
-    /** 联调期：启动后一段时间内逐条记日志（与高 PPS 下快速确认效果）。 */
-    private static final long DETAILED_LOG_WINDOW_MS = 30_000L;
-    private static final int MILESTONE_INTERVAL = 50;
-    /** 运行状态页事件栏最小刷新间隔，避免高 PPS 下 onEvent 洪泛卡死主线程。 */
-    private static final long UI_EVENT_MIN_INTERVAL_MS = 500L;
-    /** 入站待回显队列容量；满时读线程阻塞，对 Broker 施加背压。 */
-    private static final int INCOMING_QUEUE_CAPACITY = 4096;
-    /** 批量 flush，减少每包 syscall。 */
-    private static final int FLUSH_EVERY_N_SENDS = 16;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -127,7 +116,7 @@ final class MqttResponderRunner implements ProbeRunner {
                     + "，将原样转发到 " + config.mqttPublishTopic);
             callback.onMetrics(snapshot(false), Collections.emptyList());
 
-            incomingQueue = new ArrayBlockingQueue<>(INCOMING_QUEUE_CAPACITY);
+            incomingQueue = new ArrayBlockingQueue<>(ProbeConstants.Mqtt.INCOMING_QUEUE_CAPACITY_PKT);
             sessionStartMs = System.currentTimeMillis();
             readerThread = new Thread(this::readLoop, "mqtt-responder-reader");
             readerThread.start();
@@ -144,12 +133,12 @@ final class MqttResponderRunner implements ProbeRunner {
                     throw new IllegalStateException("读线程异常: " + readerExc.getMessage(), readerExc);
                 }
                 long nowNs = System.nanoTime();
-                if (nowNs - lastPingNs >= 20_000_000_000L) {
+                if (nowNs - lastPingNs >= ProbeConstants.Mqtt.RESPONDER_KEEPALIVE_PING_INTERVAL_NS) {
                     sendPingReq();
                     flushSendBuffer();
                     lastPingNs = nowNs;
                 }
-                if (nowNs - lastMetricsNs >= 250_000_000L) {
+                if (nowNs - lastMetricsNs >= ProbeConstants.Mqtt.RESPONDER_METRICS_INTERVAL_NS) {
                     callback.onMetrics(snapshot(false), Collections.emptyList());
                     lastMetricsNs = nowNs;
                 }
@@ -163,10 +152,10 @@ final class MqttResponderRunner implements ProbeRunner {
             }
         } finally {
             running.set(false);
-            closeSocket();
+            // 须先 drain 队列、发 DISCONNECT，再关 socket（与探测端 MqttProbeRunner 顺序一致）。
             if (readerThread != null) {
                 try {
-                    readerThread.join(500);
+                    readerThread.join(ProbeConstants.Mqtt.RESPONDER_READER_JOIN_TIMEOUT_MS);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                 }
@@ -272,11 +261,11 @@ final class MqttResponderRunner implements ProbeRunner {
             callback.onEvent("收到首条消息（" + payloadBytes + " 字节），开始回显");
             return;
         }
-        if (got % MILESTONE_INTERVAL != 0) {
+        if (got % ProbeConstants.Mqtt.MILESTONE_LOG_EVERY_N_PKT != 0) {
             return;
         }
         long nowMs = System.currentTimeMillis();
-        if (nowMs - lastProgressUiMs < UI_EVENT_MIN_INTERVAL_MS) {
+        if (nowMs - lastProgressUiMs < ProbeConstants.Mqtt.UI_EVENT_MIN_INTERVAL_MS) {
             return;
         }
         lastProgressUiMs = nowMs;
@@ -327,7 +316,8 @@ final class MqttResponderRunner implements ProbeRunner {
     }
 
     private static boolean shouldLogEchoRecv(int seq) {
-        return seq < DETAILED_LOG_MAX_COUNT || seq % MILESTONE_INTERVAL == 0;
+        return seq < ProbeConstants.Mqtt.DETAILED_LOG_MAX_PKT
+                || seq % ProbeConstants.Mqtt.MILESTONE_LOG_EVERY_N_PKT == 0;
     }
 
     /** 联调日志：回显处理耗时 + 相对探测端 clientSendMs 的去程到达延迟（wall-clock）。 */
@@ -336,8 +326,9 @@ final class MqttResponderRunner implements ProbeRunner {
             return;
         }
         long elapsedMs = Math.max(1, System.currentTimeMillis() - sessionStartMs);
-        boolean densePeriod = stamp.seq < DETAILED_LOG_MAX_COUNT || elapsedMs <= DETAILED_LOG_WINDOW_MS;
-        boolean milestone = stamp.seq % MILESTONE_INTERVAL == 0;
+        boolean densePeriod = stamp.seq < ProbeConstants.Mqtt.DETAILED_LOG_MAX_PKT
+                || elapsedMs <= ProbeConstants.Mqtt.DETAILED_LOG_WINDOW_MS;
+        boolean milestone = stamp.seq % ProbeConstants.Mqtt.MILESTONE_LOG_EVERY_N_PKT == 0;
         if (!densePeriod && !milestone) {
             return;
         }
@@ -397,7 +388,7 @@ final class MqttResponderRunner implements ProbeRunner {
         socket = new Socket();
         socket.setTcpNoDelay(true);
         socket.connect(new InetSocketAddress(config.host, config.port), config.timeoutMs);
-        socket.setSoTimeout(100);
+        socket.setSoTimeout(ProbeConstants.Network.SOCKET_READ_POLL_TIMEOUT_MS);
         input = socket.getInputStream();
         output = socket.getOutputStream();
     }
@@ -562,7 +553,7 @@ final class MqttResponderRunner implements ProbeRunner {
         synchronized (sendLock) {
             output.write(packetBuffer.toByteArray());
             sendsSinceFlush++;
-            if (forceFlush || sendsSinceFlush >= FLUSH_EVERY_N_SENDS) {
+            if (forceFlush || sendsSinceFlush >= ProbeConstants.Mqtt.FLUSH_EVERY_N_SENDS) {
                 output.flush();
                 sendsSinceFlush = 0;
             }

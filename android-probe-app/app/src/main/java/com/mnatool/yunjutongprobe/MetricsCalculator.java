@@ -5,6 +5,14 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
+/**
+ * 探测指标聚合。丢包口径由 {@code finalResult} 切换：
+ * <ul>
+ *   <li>{@code false}（运行中）：仅「发送后已超过 timeout」的未收包计丢包，在途包不计，避免长测虚高。</li>
+ *   <li>{@code true}（最终结算）：所有未收包计丢包，用于导出与结果页。</li>
+ * </ul>
+ * 运行中标签为「超时丢包率」，结束后为「丢包率」（见 MainActivity 卡片文案）。
+ */
 final class MetricsCalculator {
     private MetricsCalculator() {
     }

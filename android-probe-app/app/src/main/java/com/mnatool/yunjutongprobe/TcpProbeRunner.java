@@ -15,6 +15,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 final class TcpProbeRunner implements ProbeRunner {
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -23,6 +24,7 @@ final class TcpProbeRunner implements ProbeRunner {
     private final AtomicInteger highestReceivedSeq = new AtomicInteger(-1);
     private volatile Socket socket;
     private volatile ProbeRecvStats activeRecvStats;
+    private final AtomicReference<Throwable> receiverFailure = new AtomicReference<>();
 
     @Override
     public void start(ProbeConfig config, ProbeCallback callback) {
@@ -33,6 +35,7 @@ final class TcpProbeRunner implements ProbeRunner {
         samples.clear();
         highestReceivedSeq.set(-1);
         activeRecvStats = null;
+        receiverFailure.set(null);
         executor.execute(() -> runInternal(config, callback));
     }
 
@@ -43,14 +46,14 @@ final class TcpProbeRunner implements ProbeRunner {
     }
 
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
-        long timeoutNs = config.timeoutMs * 1_000_000L;
+        long timeoutNs = config.timeoutMs * ProbeConstants.Units.NS_PER_MS;
         Thread receiver = null;
         Throwable failure = null;
         try {
             socket = new Socket();
             socket.setTcpNoDelay(true);
             socket.connect(new InetSocketAddress(config.host, config.port), config.timeoutMs);
-            socket.setSoTimeout(100);
+            socket.setSoTimeout(ProbeConstants.Network.SOCKET_READ_POLL_TIMEOUT_MS);
             callback.onEvent("TCP 已连接，本地端口 " + socket.getLocalPort());
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
@@ -58,7 +61,7 @@ final class TcpProbeRunner implements ProbeRunner {
             receiver = new Thread(() -> receiveLoop(reader, callback), "tcp-probe-receiver");
             receiver.start();
 
-            long intervalNs = 1_000_000_000L / Math.max(1, config.pps);
+            long intervalNs = ProbeConstants.Units.NS_PER_S / Math.max(1, config.pps);
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             ProbePerfStats perf = new ProbePerfStats(config.pps);
@@ -66,6 +69,9 @@ final class TcpProbeRunner implements ProbeRunner {
             activeRecvStats = recvStats;
             int sentSeq = 0;
             for (sentSeq = 0; sentSeq < config.count && running.get(); sentSeq++) {
+                if (receiverFailure.get() != null) {
+                    break;
+                }
                 long nowNs = System.nanoTime();
                 nextNs = ProbeSendScheduler.capCatchUp(nowNs, nextNs, intervalNs, recvStats);
                 if (nowNs < nextNs) {
@@ -100,7 +106,7 @@ final class TcpProbeRunner implements ProbeRunner {
 
                 long metricsNow = System.nanoTime();
                 recvStats.checkStall(metricsNow, true, sentSeq, callback);
-                if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
+                if (metricsNow - lastMetricsNs >= ProbeConstants.Timing.RUNNER_METRICS_INTERVAL_NS) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
                 }
@@ -112,18 +118,21 @@ final class TcpProbeRunner implements ProbeRunner {
             callback.onPerfStats(perf);
             callback.onRecvStats(recvStats);
 
+            propagateReceiverFailure();
+
+            // 尾包等待：对端断连时 receiverFailure 非空，不再空等满 timeout。
             long waitUntilNs = System.nanoTime() + timeoutNs;
-            while (running.get() && System.nanoTime() < waitUntilNs) {
+            while (running.get() && receiverFailure.get() == null && System.nanoTime() < waitUntilNs) {
                 recvStats.checkStall(System.nanoTime(), false, sentSeq, callback);
                 callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                 if (snapshot(timeoutNs, false).received >= config.count) {
                     break;
                 }
-                sleepNs(100_000_000L);
+                sleepNs(ProbeConstants.Timing.TAIL_WAIT_POLL_INTERVAL_NS);
             }
         } catch (Exception exc) {
+            failure = exc;
             if (running.get()) {
-                failure = exc;
                 callback.onEvent("TCP 失败: [" + exc.getClass().getSimpleName() + "] " + exc.getMessage());
             }
         } finally {
@@ -131,9 +140,15 @@ final class TcpProbeRunner implements ProbeRunner {
             closeSocket();
             if (receiver != null) {
                 try {
-                    receiver.join(300);
+                    receiver.join(ProbeConstants.Timing.RECEIVER_JOIN_TIMEOUT_MS);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
+                }
+            }
+            if (failure == null) {
+                Throwable recvFail = receiverFailure.get();
+                if (recvFail != null) {
+                    failure = recvFail;
                 }
             }
             ProbeMetrics finalMetrics = snapshot(timeoutNs, true);
@@ -149,12 +164,23 @@ final class TcpProbeRunner implements ProbeRunner {
         }
     }
 
+    private void propagateReceiverFailure() throws java.io.IOException {
+        Throwable readerExc = receiverFailure.get();
+        if (readerExc != null) {
+            throw new java.io.IOException(readerExc.getMessage(), readerExc);
+        }
+    }
+
     private void receiveLoop(BufferedReader reader, ProbeCallback callback) {
         while (running.get()) {
             try {
                 String line = reader.readLine();
                 if (line == null) {
-                    callback.onEvent("TCP 连接已关闭");
+                    if (running.get()) {
+                        receiverFailure.compareAndSet(null,
+                                new java.io.IOException("TCP 连接已由对端关闭"));
+                        callback.onEvent("TCP 连接已关闭");
+                    }
                     running.set(false);
                     break;
                 }
@@ -188,7 +214,9 @@ final class TcpProbeRunner implements ProbeRunner {
                 // Continue so stop() can close the socket quickly.
             } catch (Exception exc) {
                 if (running.get()) {
+                    receiverFailure.compareAndSet(null, exc);
                     callback.onEvent("TCP 接收异常: " + exc.getMessage());
+                    running.set(false);
                 }
             }
         }

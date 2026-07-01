@@ -8,8 +8,8 @@ import java.util.Locale;
  * 收包停滞与过载侧写：区分「对端/Broker 已挂仍空发」与真实网络丢包，写入 summary 便于事后解读。
  */
 final class ProbeRecvStats {
-    /** 最高收包序号长时间不前进则告警并（探测中）提前停发。 */
-    static final long STALL_THRESHOLD_MS = 8_000L;
+    /** 与 {@link ProbeConstants.Timing#RECV_STALL_THRESHOLD_MS} 同源，供测试与 summary 引用。 */
+    static final long STALL_THRESHOLD_MS = ProbeConstants.Timing.RECV_STALL_THRESHOLD_MS;
 
     static final String POLICY_DEFAULT = "default";
     static final String POLICY_WEAK_NET_WARN_ONLY = "weak_net_warn_only";
@@ -41,7 +41,7 @@ final class ProbeRecvStats {
         this.stallPolicy = stallPolicy == null ? POLICY_DEFAULT : stallPolicy;
     }
 
-    /** 弱网 Profile 激活时：停滞仅告警，发包阶段仍跑满 Count。 */
+    /** 弱网 Profile 激活时：停滞仅告警，发包阶段仍跑满 Count（stallPolicy=weak_net_warn_only）。 */
     static ProbeRecvStats forConfig(ProbeConfig config) {
         if (config != null && config.weakNetProfile.isActive()) {
             return new ProbeRecvStats(STALL_THRESHOLD_MS, false, POLICY_WEAK_NET_WARN_ONLY);
@@ -55,15 +55,16 @@ final class ProbeRecvStats {
     }
 
     /**
-     * 检测收包停滞。
+     * 检测收包停滞（最后收到的 seq 长时间不前进）。
      *
-     * @return {@code true} 表示探测发包阶段应提前结束（避免断连后空发拉高连续丢包）
+     * @param duringPublish {@code true}=发包循环内；弱网下仍可能返回 {@code false} 以继续发满 Count
+     * @return {@code true} 表示发包阶段应提前结束（正常网 stopPublishOnStall，避免断连后空发拉高连续丢包）
      */
     boolean checkStall(long nowNs, boolean duringPublish, int sentSeq, ProbeCallback callback) {
         if (lastRecvAdvanceNs < 0) {
             return false;
         }
-        long stallMs = (nowNs - lastRecvAdvanceNs) / 1_000_000L;
+        long stallMs = (nowNs - lastRecvAdvanceNs) / ProbeConstants.Units.NS_PER_MS;
         if (stallMs < stallThresholdMs) {
             return false;
         }

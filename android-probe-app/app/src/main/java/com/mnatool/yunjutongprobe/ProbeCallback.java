@@ -5,8 +5,10 @@ import java.util.List;
 interface ProbeCallback {
     void onEvent(String message);
 
+    /** 运行中指标；{@code finalResult} 在 metrics 中区分超时丢包率 vs 最终丢包率。 */
     void onMetrics(ProbeMetrics metrics, List<ProbeSample> samples);
 
+    /** 正常结束（含用户停止后的 finalResult 结算）；探测端自然完成时 UI 可能仍停留在 awaitingConfirm。 */
     void onFinished(ProbeMetrics metrics, List<ProbeSample> samples);
 
     default void onFailed(Throwable error, ProbeMetrics metrics, List<ProbeSample> samples) {

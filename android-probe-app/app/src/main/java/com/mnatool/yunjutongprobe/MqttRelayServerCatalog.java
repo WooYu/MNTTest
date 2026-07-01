@@ -5,7 +5,7 @@ package com.mnatool.yunjutongprobe;
  * 所有节点共用端口 {@link #PORT}。
  */
 final class MqttRelayServerCatalog {
-    static final String PORT = "1883";
+    static final String PORT = String.valueOf(ProbeConstants.Network.MQTT_BROKER_PORT);
 
     private static final Entry[] SERVERS = {
             new Entry("西安", "113.133.169.192"),

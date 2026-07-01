@@ -7,7 +7,7 @@ final class ProbeDefaults {
     static final String PREFERENCE_VERSION_KEY = "probeDefaultsVersion";
     static final int VERSION = 4;
 
-    /** 参数预设档位：一键填充 发包数/速率/包大小/超时。 */
+    /** 参数预设档位：一键填充 count(pkt) / pps / packetBytes(B) / timeoutMs(ms)。 */
     enum Preset {
         FIELD("现场千级", "1000", "10", "200", "5000"),
         LAB("实验室十万级", "100000", "2000", "100", "60000");
@@ -46,9 +46,10 @@ final class ProbeDefaults {
         return null;
     }
 
-    /** 与 tools/probe_run_lib.is_high_pps_run 对齐：count≥5万 或 pps≥500 视为高 PPS。 */
+    /** 与 tools/probe_run_lib.is_high_pps_run 对齐：count≥阈值 或 pps≥阈值 视为高 PPS。 */
     static boolean isHighPpsRun(int count, int pps) {
-        return count >= 50_000 || pps >= 500;
+        return count >= ProbeConstants.HighPps.COUNT_THRESHOLD_PKT
+                || pps >= ProbeConstants.HighPps.PPS_THRESHOLD;
     }
 
     /** 高 PPS 场景不在回显端逐条记 seq，避免 echoLog/GC 成为瓶颈。 */

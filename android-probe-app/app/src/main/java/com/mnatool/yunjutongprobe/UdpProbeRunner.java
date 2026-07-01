@@ -43,19 +43,19 @@ final class UdpProbeRunner implements ProbeRunner {
     }
 
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
-        long timeoutNs = config.timeoutMs * 1_000_000L;
+        long timeoutNs = config.timeoutMs * ProbeConstants.Units.NS_PER_MS;
         Thread receiver = null;
         Throwable failure = null;
         try {
             socket = new DatagramSocket();
-            socket.setSoTimeout(100);
+            socket.setSoTimeout(ProbeConstants.Network.SOCKET_READ_POLL_TIMEOUT_MS);
             InetAddress address = InetAddress.getByName(config.host);
             callback.onEvent("UDP socket 已创建，本地端口 " + socket.getLocalPort());
 
             receiver = new Thread(() -> receiveLoop(callback), "udp-probe-receiver");
             receiver.start();
 
-            long intervalNs = 1_000_000_000L / Math.max(1, config.pps);
+            long intervalNs = ProbeConstants.Units.NS_PER_S / Math.max(1, config.pps);
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             ProbePerfStats perf = new ProbePerfStats(config.pps);
@@ -96,7 +96,7 @@ final class UdpProbeRunner implements ProbeRunner {
 
                 long metricsNow = System.nanoTime();
                 recvStats.checkStall(metricsNow, true, sentSeq, callback);
-                if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
+                if (metricsNow - lastMetricsNs >= ProbeConstants.Timing.RUNNER_METRICS_INTERVAL_NS) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
                 }
@@ -108,6 +108,7 @@ final class UdpProbeRunner implements ProbeRunner {
             callback.onPerfStats(perf);
             callback.onRecvStats(recvStats);
 
+            // 尾包等待：timeout 窗口内尽量收齐；finally 中 snapshot(finalResult=true) 做最终丢包结算。
             long waitUntilNs = System.nanoTime() + timeoutNs;
             while (running.get() && System.nanoTime() < waitUntilNs) {
                 recvStats.checkStall(System.nanoTime(), false, sentSeq, callback);
@@ -115,7 +116,7 @@ final class UdpProbeRunner implements ProbeRunner {
                 if (snapshotSamples().size() >= config.count && snapshot(timeoutNs, false).received >= config.count) {
                     break;
                 }
-                sleepNs(100_000_000L);
+                sleepNs(ProbeConstants.Timing.TAIL_WAIT_POLL_INTERVAL_NS);
             }
         } catch (Exception exc) {
             if (running.get()) {
@@ -130,7 +131,7 @@ final class UdpProbeRunner implements ProbeRunner {
             }
             if (receiver != null) {
                 try {
-                    receiver.join(300);
+                    receiver.join(ProbeConstants.Timing.RECEIVER_JOIN_TIMEOUT_MS);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                 }

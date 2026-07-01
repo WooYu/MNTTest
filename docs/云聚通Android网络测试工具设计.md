@@ -1,5 +1,7 @@
 # 云聚通 Android 网络测试工具设计方案
 
+> **文档定位**：产品愿景与总体架构（2026 年初稿）。**当前实现与行为口径**以 [android-probe-as-is.md](./android-probe-as-is.md) 为准；**现场测试**以 [云聚通Probe网络测试执行手册.md](./云聚通Probe网络测试执行手册.md) 为准。文档索引见 [README.md](./README.md)。
+
 ## 1. 结论先行
 
 为了验证腾讯云聚通的加速能力，建议做一个独立的 Android Probe App，并保留两条测试链路：

@@ -5,7 +5,7 @@ final class MqttDefaultProfile {
     static final int VERSION = 1;
     static final int PROTOCOL_INDEX = 2;
     static final String HOST = "113.133.169.192";
-    static final String PORT = "1883";
+    static final String PORT = String.valueOf(ProbeConstants.Network.MQTT_BROKER_PORT);
     static final String ENV = "test";
     static final String CLIENT_ID = "V37G00000108";
     static final String PUBLISH_TOPIC = "V37C00000133";

@@ -5,9 +5,13 @@ import org.json.JSONObject;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
+/**
+ * 探测 payload 编解码。包长小于 JSON 骨架时用 Compact（Autel 兼容 {@code sendMs,seq,AAA…}），
+ * RTT 在探测端用 wall-clock 毫秒；JSON 模式用 nanoTime 差值，回显端可打 server 时间戳供分段时延。
+ */
 final class ProbePayloadCodec {
-    /** UI 与构建允许的最小包长（对齐 Autel 联调常用 20B）。 */
-    static final int MIN_PACKET_BYTES = 20;
+    /** 与 {@link ProbeConstants.Payload#MIN_PACKET_BYTES_B} 同源。 */
+    static final int MIN_PACKET_BYTES = ProbeConstants.Payload.MIN_PACKET_BYTES_B;
 
     private ProbePayloadCodec() {
     }

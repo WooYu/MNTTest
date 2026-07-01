@@ -28,9 +28,6 @@ final class MqttProbeRunner implements ProbeRunner {
     private static final int MQTT_SUBACK = 9;
     private static final int MQTT_PINGREQ = 12;
     private static final int MQTT_DISCONNECT = 14;
-    /** 弱网下单连接允许的在途包上限（约 8s × PPS），避免 Broker/TCP 积压过载断连。 */
-    private static final int WEAK_NET_IN_FLIGHT_SECONDS = 8;
-    private static final long PING_INTERVAL_NS = 10_000_000_000L;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -64,7 +61,7 @@ final class MqttProbeRunner implements ProbeRunner {
     }
 
     private void runInternal(ProbeConfig config, ProbeCallback callback) {
-        long timeoutNs = config.timeoutMs * 1_000_000L;
+        long timeoutNs = config.timeoutMs * ProbeConstants.Units.NS_PER_MS;
         Thread receiver = null;
         Throwable failure = null;
         Log.i(TAG, "runInternal start: env=" + config.mqttEnv + " clientId=" + config.mqttClientId
@@ -95,7 +92,7 @@ final class MqttProbeRunner implements ProbeRunner {
             receiver = new Thread(() -> receiveLoop(config, callback), "mqtt-probe-receiver");
             receiver.start();
 
-            long intervalNs = 1_000_000_000L / Math.max(1, config.pps);
+            long intervalNs = ProbeConstants.Units.NS_PER_S / Math.max(1, config.pps);
             long nextNs = System.nanoTime();
             long lastMetricsNs = 0;
             long lastPingNs = System.nanoTime();
@@ -146,7 +143,7 @@ final class MqttProbeRunner implements ProbeRunner {
                     throw exc;
                 }
                 perf.afterSend();
-                if (sentSeq % 50 == 0) {
+                if (sentSeq % ProbeConstants.Mqtt.PROBE_PUBLISH_DEBUG_EVERY_N_PKT == 0) {
                     Log.d(TAG, "publish seq=" + sentSeq + "/" + config.count
                             + " highestRecv=" + highestReceivedSeq.get());
                 }
@@ -154,7 +151,7 @@ final class MqttProbeRunner implements ProbeRunner {
 
                 long metricsNow = System.nanoTime();
                 recvStats.checkStall(metricsNow, true, sentSeq, callback);
-                if (metricsNow - lastPingNs >= PING_INTERVAL_NS) {
+                if (metricsNow - lastPingNs >= ProbeConstants.Mqtt.PROBE_KEEPALIVE_PING_INTERVAL_NS) {
                     try {
                         sendPingReq();
                     } catch (Exception exc) {
@@ -165,7 +162,7 @@ final class MqttProbeRunner implements ProbeRunner {
                     }
                     lastPingNs = metricsNow;
                 }
-                if (metricsNow - lastMetricsNs >= 1_000_000_000L) {
+                if (metricsNow - lastMetricsNs >= ProbeConstants.Timing.RUNNER_METRICS_INTERVAL_NS) {
                     callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
                     lastMetricsNs = metricsNow;
                 }
@@ -177,15 +174,17 @@ final class MqttProbeRunner implements ProbeRunner {
             callback.onPerfStats(perf);
             callback.onRecvStats(recvStats);
 
+            // 尾包等待：给已发未收包一个 timeout 窗口收齐；运行中仍用 finalResult=false。
+            // Broker 已断连时不再空等满 timeout（LAB 档可达 60s），直接进 finally 做 finalResult 结算。
             long waitUntilNs = System.nanoTime() + timeoutNs;
-            while (running.get() && System.nanoTime() < waitUntilNs) {
+            while (running.get() && !mqttConnectionLost && System.nanoTime() < waitUntilNs) {
                 recvStats.checkStall(System.nanoTime(), false, sentSeq, callback);
                 ProbeMetrics waitMetrics = snapshot(timeoutNs, false);
                 callback.onMetrics(waitMetrics, snapshotSamples());
                 if (waitMetrics.received >= config.count) {
                     break;
                 }
-                sleepNs(100_000_000L);
+                sleepNs(ProbeConstants.Timing.TAIL_WAIT_POLL_INTERVAL_NS);
             }
         } catch (Exception exc) {
             if (running.get() && !mqttConnectionLost) {
@@ -204,7 +203,7 @@ final class MqttProbeRunner implements ProbeRunner {
             closeSocket();
             if (receiver != null) {
                 try {
-                    receiver.join(300);
+                    receiver.join(ProbeConstants.Timing.RECEIVER_JOIN_TIMEOUT_MS);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                 }
@@ -231,7 +230,7 @@ final class MqttProbeRunner implements ProbeRunner {
         socket = new Socket();
         socket.setTcpNoDelay(true);
         socket.connect(new InetSocketAddress(config.host, config.port), config.timeoutMs);
-        socket.setSoTimeout(100);
+        socket.setSoTimeout(ProbeConstants.Network.SOCKET_READ_POLL_TIMEOUT_MS);
         input = socket.getInputStream();
         output = socket.getOutputStream();
         Log.i(TAG, "openSocket: connected, localPort=" + socket.getLocalPort());
@@ -397,6 +396,7 @@ final class MqttProbeRunner implements ProbeRunner {
         if (inFlightCap == Integer.MAX_VALUE) {
             return;
         }
+        // 弱网 MQTT：限制 sentSeq - lastRecvSeq，避免 TCP/Broker 积压导致断连。
         while (running.get() && !mqttConnectionLost) {
             int inFlight = sentSeq - recvStats.lastRecvSeq();
             if (inFlight <= inFlightCap) {
@@ -405,17 +405,19 @@ final class MqttProbeRunner implements ProbeRunner {
             recvStats.recordInFlightThrottle();
             recvStats.checkStall(System.nanoTime(), true, sentSeq, callback);
             callback.onMetrics(snapshot(timeoutNs, false), snapshotSamples());
-            sleepNs(50_000_000L);
+            sleepNs(ProbeConstants.Timing.IN_FLIGHT_POLL_INTERVAL_NS);
         }
     }
 
     private static int inFlightCapFor(ProbeConfig config) {
         if (config != null && config.weakNetProfile.isActive()) {
-            return Math.max(1000, config.pps * WEAK_NET_IN_FLIGHT_SECONDS);
+            return Math.max(ProbeConstants.Mqtt.WEAK_NET_IN_FLIGHT_MIN_PKT,
+                    config.pps * ProbeConstants.Mqtt.WEAK_NET_IN_FLIGHT_WINDOW_S);
         }
         return Integer.MAX_VALUE;
     }
 
+    /** Broker/TCP 断连：停发并进入尾包等待，不将 failure 置位（仍 onFinished 并带 partial 样本）。 */
     private boolean handleConnectionIoFailure(Exception exc, int sentSeq,
             ProbeRecvStats recvStats, ProbeCallback callback) {
         if (!isConnectionIoError(exc)) {

@@ -1,8 +1,20 @@
 package com.mnatool.yunjutongprobe;
 
+/**
+ * 三页流程纯状态机（无 Android 依赖，可单测）。
+ *
+ * <p>关键约定：
+ * <ul>
+ *   <li>{@link #completePending} 后仍处于 RUNNING，且保留 {@code activeRunId}，
+ *       以便 Runner 迟到回调仍被 {@link #accepts} 丢弃前可安全刷新 UI。</li>
+ *   <li>自然完成须 {@link #confirmResult} 才进 RESULT；返回键走 {@code resetForRetest} 不导出。</li>
+ *   <li>停止/失败走 {@link #finish}，立即进 RESULT 并清空 {@code activeRunId}。</li>
+ * </ul>
+ */
 final class ProbeFlowState {
     enum Page { CONFIG, RUNNING, RESULT }
 
+    /** COMPLETED=发满并结算；STOPPED=用户停止；FAILED=连接/鉴权/运行异常。 */
     enum Outcome { NONE, COMPLETED, STOPPED, FAILED }
 
     private Page page = Page.CONFIG;
@@ -39,6 +51,7 @@ final class ProbeFlowState {
         return true;
     }
 
+    /** 仅 RUNNING 且 runId 匹配时接受 Runner 回调（含 awaitingConfirm 子态）。 */
     boolean accepts(String runId) {
         return page == Page.RUNNING && activeRunId != null && activeRunId.equals(runId);
     }

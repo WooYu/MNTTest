@@ -1,6 +1,7 @@
 # 云聚通 Probe 网络测试执行手册
 
-> **结论归档：** [云聚通 Probe 测试结论（飞书）](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)
+> **结论归档：** [云聚通 Probe 测试结论（飞书）](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)  
+> **文档索引：** [README.md](./README.md) · App 规格见 [android-probe-as-is.md](./android-probe-as-is.md)
 
 双 Android 平板 + MQTT Probe，验证云聚通对中转链路的加速效果，复刻飞书《测试记录 v2.0》记录 1/2。指标以应用层往返为准，ABBA 四轮抵消时段波动。
 
@@ -419,9 +420,11 @@ test-runs/
 
 | 文档 | 路径 |
 | --- | --- |
-| 脚本索引 | `tools/README.md` |
-| App 使用 | `android-probe-app/README.md` |
-| 总体设计 | `docs/云聚通Android网络测试工具设计.md` |
+| 文档索引 | [docs/README.md](./README.md) |
+| App 现状规格 | [docs/android-probe-as-is.md](./android-probe-as-is.md) |
+| 脚本索引 | [tools/README.md](../tools/README.md) |
+| App 使用 | [android-probe-app/README.md](../android-probe-app/README.md) |
+| 总体设计（愿景） | [云聚通Android网络测试工具设计.md](./云聚通Android网络测试工具设计.md) |
 | **结论归档** | [飞书《测试 v3.0-App Probe》](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae) |
 | 业务记录 | [飞书《测试记录 v2.0》](https://q00enigbkuh.feishu.cn/wiki/WlqwwWRnpiLJ2fkSDWmc9P20nJg) |
 

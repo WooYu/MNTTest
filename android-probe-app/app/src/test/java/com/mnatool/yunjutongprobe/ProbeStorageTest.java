@@ -75,13 +75,17 @@ public class ProbeStorageTest {
         entry.put("received", 9);
         entry.put("lost", 1);
         entry.put("lossRate", 0.1);
+        entry.put("p50RttMs", 30.0);
         entry.put("p95RttMs", 42.0);
+        entry.put("weakNetSummary", "Clumsy，丢包 10%");
 
         ProbeRunRecord record = ProbeStorage.recordFromIndexEntry(entry);
         assertNotNull(record);
         assertEquals("run-abc", record.runId);
         assertEquals(9, record.received);
+        assertEquals(30.0, record.p50RttMs, 0.0001);
         assertEquals(42.0, record.p95RttMs, 0.0001);
+        assertEquals("Clumsy，丢包 10%", record.weakNetSummary);
     }
 
     @Test

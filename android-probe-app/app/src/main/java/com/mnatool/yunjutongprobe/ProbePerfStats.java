@@ -19,7 +19,7 @@ final class ProbePerfStats {
 
     ProbePerfStats(int targetPps) {
         this.targetPps = Math.max(1, targetPps);
-        this.intervalNs = 1_000_000_000L / this.targetPps;
+        this.intervalNs = ProbeConstants.Units.NS_PER_S / this.targetPps;
     }
 
     /** 每次发包前调用：sendNs 实际发出时刻，scheduledNs 计划发出时刻。 */
@@ -49,7 +49,7 @@ final class ProbePerfStats {
             return 0;
         }
         long end = endNs > 0 ? endNs : System.nanoTime();
-        return Math.max(1L, (end - startNs) / 1_000_000L);
+        return Math.max(1L, (end - startNs) / ProbeConstants.Units.NS_PER_MS);
     }
 
     double actualPps() {
@@ -57,7 +57,7 @@ final class ProbePerfStats {
     }
 
     long maxSendLagMs() {
-        return maxLagNs / 1_000_000L;
+        return maxLagNs / ProbeConstants.Units.NS_PER_MS;
     }
 
     int sendBehindCount() {
@@ -68,9 +68,10 @@ final class ProbePerfStats {
         return sent;
     }
 
-    /** 实际发包速率显著低于目标(<95%)或单次滞后过大(>50ms)，视为发包受限。 */
+    /** 实际发包速率显著低于目标或单次滞后过大，视为发包受限（阈值见 {@link ProbeConstants.Perf}）。 */
     boolean belowTarget() {
-        return sent > 0 && (actualPps() < targetPps * 0.95 || maxSendLagMs() > 50);
+        return sent > 0 && (actualPps() < targetPps * ProbeConstants.Perf.ACTUAL_PPS_BELOW_TARGET_RATIO
+                || maxSendLagMs() > ProbeConstants.Perf.MAX_SEND_LAG_WARN_MS);
     }
 
     String warningText() {

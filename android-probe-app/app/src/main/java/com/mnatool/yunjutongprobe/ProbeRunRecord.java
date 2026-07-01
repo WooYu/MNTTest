@@ -21,6 +21,7 @@ final class ProbeRunRecord {
     final int lost;
     final double lossRate;
     final double avgRttMs;
+    final double p50RttMs;
     final double p95RttMs;
     final double p99RttMs;
     final double jitterMs;
@@ -43,13 +44,14 @@ final class ProbeRunRecord {
             int lost,
             double lossRate,
             double avgRttMs,
+            double p50RttMs,
             double p95RttMs,
             double p99RttMs,
             double jitterMs,
             int maxBurstLoss
     ) {
         this(baseName, exportStamp, summaryFile, csvFile, runId, protocol, modeTag, host, port, count,
-                sent, received, lost, lossRate, avgRttMs, p95RttMs, p99RttMs, jitterMs, maxBurstLoss, "");
+                sent, received, lost, lossRate, avgRttMs, p50RttMs, p95RttMs, p99RttMs, jitterMs, maxBurstLoss, "");
     }
 
     ProbeRunRecord(
@@ -68,6 +70,7 @@ final class ProbeRunRecord {
             int lost,
             double lossRate,
             double avgRttMs,
+            double p50RttMs,
             double p95RttMs,
             double p99RttMs,
             double jitterMs,
@@ -89,6 +92,7 @@ final class ProbeRunRecord {
         this.lost = lost;
         this.lossRate = lossRate;
         this.avgRttMs = avgRttMs;
+        this.p50RttMs = p50RttMs;
         this.p95RttMs = p95RttMs;
         this.p99RttMs = p99RttMs;
         this.jitterMs = jitterMs;
@@ -144,12 +148,12 @@ final class ProbeRunRecord {
                 "保存位置: %s/%s/\n导出时间: %s\nRun ID: %s\n模式: %s   协议: %s\n服务器: %s:%d\n预设发包: %d\n"
                         + weakNetLine
                         + "发包: %d   收包: %d   丢包: %d   丢包率: %.1f%%\n"
-                        + "Avg RTT: %.0fms   P95: %.0fms   P99: %.0fms\n"
+                        + "Avg RTT: %.0fms   P50: %.0fms   P95: %.0fms   P99: %.0fms\n"
                         + "最大连续丢包: %d   抖动: %.1fms\n\n"
                         + "CSV: %s\nSummary: %s",
                 DOWNLOADS_FOLDER, baseName, exportStamp, runId, modeTag, protocol, host, port, count,
                 sent, received, lost, lossRate * 100,
-                avgRttMs, p95RttMs, p99RttMs,
+                avgRttMs, p50RttMs, p95RttMs, p99RttMs,
                 maxBurstLoss, jitterMs,
                 ProbeStorage.CSV_NAME, ProbeStorage.SUMMARY_NAME);
     }

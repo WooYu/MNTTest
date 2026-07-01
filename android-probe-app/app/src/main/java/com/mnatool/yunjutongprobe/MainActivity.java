@@ -45,6 +45,10 @@ import java.util.UUID;
 public final class MainActivity extends Activity {
     private static final String PREFS = "probe_config";
     private static final int REQ_STORAGE = 1001;
+    /** 存储权限授予后待执行的导出类型（Android ≤9 写 Downloads 需要）。 */
+    private static final int PENDING_EXPORT_NONE = 0;
+    private static final int PENDING_EXPORT_PROBE = 1;
+    private static final int PENDING_EXPORT_ECHO = 2;
     // 配色统一收敛到 Palette；此处保留语义别名以贴合各处调用习惯。
     private static final int BG = Palette.BG;
     private static final int SURFACE = Palette.SURFACE;
@@ -55,17 +59,8 @@ public final class MainActivity extends Activity {
     private static final int GREEN = Palette.SUCCESS;
     private static final int RED = Palette.DANGER;
     private static final int ORANGE = Palette.WARNING;
-    private static final String DEFAULT_SIDE_CAR_HOST = "10.0.2.2";
+    private static final String DEFAULT_SIDE_CAR_HOST = ProbeConstants.Network.EMULATOR_SIDE_CAR_HOST;
     private static final String MQTT_TOKEN_FETCHING = "获取中…";
-    private static final long MQTT_TOKEN_PREFETCH_DELAY_MS = 400L;
-    private static final int COUNT_MIN = 1;
-    private static final int COUNT_MAX = 200_000;
-    private static final int PPS_MIN = 1;
-    private static final int PPS_MAX = 8_000;
-    private static final int PACKET_BYTES_MIN = 1;
-    private static final int PACKET_BYTES_MAX = 2_000;
-    private static final int TIMEOUT_MS_MIN = 100;
-    private static final int TIMEOUT_MS_MAX = 300_000;
 
     private EditText hostInput;
     private Spinner hostSpinner;
@@ -119,8 +114,8 @@ public final class MainActivity extends Activity {
     private TextView metricsLineView;
     private EventLogScrollView eventLogScrollView;
     private final List<String> eventLines = new ArrayList<>();
-    private static final int MAX_EVENT_LINES = 30;
-    private static final int MAX_RESPONDER_EVENT_LINES = 100;
+    private static final int MAX_EVENT_LINES = ProbeConstants.Ui.MAX_PROBE_EVENT_LOG_LINES;
+    private static final int MAX_RESPONDER_EVENT_LINES = ProbeConstants.Ui.MAX_RESPONDER_EVENT_LOG_LINES;
     private boolean eventLogFollowLatest = true;
     private TextView exportView;
     private MetricsChartView chartView;
@@ -197,15 +192,20 @@ public final class MainActivity extends Activity {
     private TextView responderReceivedView;
     private TextView responderEchoedView;
     private boolean responderRunMode;
-    private final ProbeFlowState flow = new ProbeFlowState();
+    private final ProbeSessionCoordinator session = new ProbeSessionCoordinator();
+
+    /** CONFIG 页：参数设置与开始测试。 */
+    private final ConfigPageSection configPage = new ConfigPageSection();
+    /** RUNNING 页：实时监测、停止/取消/完成待确认。 */
+    private final RunningPageSection runningPage = new RunningPageSection();
+    /** RESULT 页：结果展示、导出与加速对比。 */
+    private final ResultPageSection resultPage = new ResultPageSection();
     private static final String[] STEP_LABELS = {"参数", "运行", "测试"};
     private View stepBadgeChrome;
     private TextView stepBadgeView;
     private TextView configProtocolChipView;
     private TextView configModeChipView;
     private TextView configTargetChipView;
-    private boolean stopRequested;
-    private boolean cancelRequested;
     private TextView resultSummaryView;
     private TextView resultStatusView;
     private TextView resultLossValue;
@@ -227,7 +227,7 @@ public final class MainActivity extends Activity {
     private int mqttTokenFetchGeneration;
     private final Handler mqttTokenHandler = new Handler(Looper.getMainLooper());
     private Runnable mqttTokenPrefetchRunnable;
-    private boolean pendingExportAfterPermission;
+    private int pendingExportKind = PENDING_EXPORT_NONE;
     private TabletLayout.Tier layoutTier;
     private View monitorBtnSpacer;
     private View monitorProgressTrack;
@@ -247,6 +247,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        // 仅 stop Runner；迟到 UI 回调仍可能到达，依赖 session.flow().accepts(runId) 与页面销毁后勿强依赖 View。
         if (runner != null) {
             runner.stop();
         }
@@ -260,12 +261,15 @@ public final class MainActivity extends Activity {
             return;
         }
         if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            if (pendingExportAfterPermission) {
-                pendingExportAfterPermission = false;
-                exportLastRun(true);
+            int kind = pendingExportKind;
+            pendingExportKind = PENDING_EXPORT_NONE;
+            if (kind == PENDING_EXPORT_PROBE) {
+                resultPage.exportLastRun(true);
+            } else if (kind == PENDING_EXPORT_ECHO) {
+                resultPage.exportEchoRun();
             }
         } else {
-            pendingExportAfterPermission = false;
+            pendingExportKind = PENDING_EXPORT_NONE;
             Toast.makeText(this, "需要存储权限才能导出到 Download 目录", Toast.LENGTH_LONG).show();
         }
     }
@@ -280,20 +284,21 @@ public final class MainActivity extends Activity {
             closeHistory();
             return;
         }
-        if (flow.page() == ProbeFlowState.Page.RUNNING) {
-            if (flow.awaitingConfirm()) {
+        if (session.flow().page() == ProbeFlowState.Page.RUNNING) {
+            if (session.flow().awaitingConfirm()) {
                 // 测试已完成、待确认：返回键回到参数设置页，不直接跳结果页
                 resetForRetest();
             } else {
-                confirmStopAndShowResult();
+                runningPage.confirmStopAndShowResult();
             }
-        } else if (flow.page() == ProbeFlowState.Page.RESULT) {
+        } else if (session.flow().page() == ProbeFlowState.Page.RESULT) {
             resetForRetest();
         } else {
             super.onBackPressed();
         }
     }
 
+    // ----- 共享：根布局、步骤条、历史页、通用 UI 工厂 -----
     private View buildContent() {
         layoutTier = TabletLayout.resolve(this);
         FrameLayout root = new FrameLayout(this);
@@ -307,9 +312,9 @@ public final class MainActivity extends Activity {
         outer.addView(pageContainer, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        pageConfig = buildConfigPage();
-        pageMonitor = buildMonitorPage();
-        pageResult = buildResultPage();
+        pageConfig = configPage.build();
+        pageMonitor = runningPage.build();
+        pageResult = resultPage.build();
         pageHistory = buildHistoryPage();
         pageHistoryDetail = buildHistoryDetailPage();
 
@@ -333,9 +338,9 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
         renderPage();
-        startButton.setOnClickListener(v -> startProbe());
-        stopButton.setOnClickListener(v -> confirmStopAndShowResult());
-        exportButton.setOnClickListener(v -> exportLastRun(true));
+        startButton.setOnClickListener(v -> configPage.startProbe());
+        stopButton.setOnClickListener(v -> runningPage.confirmStopAndShowResult());
+        exportButton.setOnClickListener(v -> resultPage.exportLastRun(true));
         return root;
     }
 
@@ -823,7 +828,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showStepHint() {
-        ProbeFlowState.Page page = flow.page();
+        ProbeFlowState.Page page = session.flow().page();
         int current = page.ordinal();
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < STEP_LABELS.length; i++) {
@@ -848,7 +853,7 @@ public final class MainActivity extends Activity {
     }
 
     private void renderPage() {
-        ProbeFlowState.Page page = flow.page();
+        ProbeFlowState.Page page = session.flow().page();
         pageConfig.setVisibility(page == ProbeFlowState.Page.CONFIG ? View.VISIBLE : View.GONE);
         pageMonitor.setVisibility(page == ProbeFlowState.Page.RUNNING ? View.VISIBLE : View.GONE);
         pageResult.setVisibility(page == ProbeFlowState.Page.RESULT ? View.VISIBLE : View.GONE);
@@ -885,85 +890,6 @@ public final class MainActivity extends Activity {
         stepBadgeView.setBackground(rounded(bg, bg, size / 2));
     }
 
-    private View buildConfigPage() {
-        startButton = primaryCtaButton("开始测试", BLUE);
-        TextView historyLink = headerTextLink("历史记录");
-        historyLink.setOnClickListener(v -> openHistory());
-        TextView helpLink = headerTextLink("说明");
-        helpLink.setOnClickListener(v -> showHelpDialog());
-        View footer = configStartFooter(startButton);
-
-        View connection = configConnectionSection();
-        View probe = configProbeSection();
-        View mode = configModeSection();
-        View weakNet = configWeakNetSection();
-        View mqtt = mqttConfigBlock();
-        updateProtocolUi();
-        refreshModeToggle();
-        refreshPresetToggle();
-        refreshConfigHeaderChips();
-
-        if (TabletLayout.useWideColumns(layoutTier)) {
-            LinearLayout page = new LinearLayout(this);
-            page.setOrientation(LinearLayout.VERTICAL);
-            page.setLayoutParams(new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-            page.setBackgroundColor(BG);
-
-            LinearLayout headerWrap = new LinearLayout(this);
-            headerWrap.setOrientation(LinearLayout.VERTICAL);
-            headerWrap.setPadding(
-                    dp(TabletLayout.pagePaddingH(layoutTier)),
-                    dp(TabletLayout.pagePaddingV(layoutTier)),
-                    dp(TabletLayout.pagePaddingH(layoutTier)),
-                    0);
-            headerWrap.addView(header(historyLink, helpLink));
-            page.addView(headerWrap, matchWrap());
-
-            LinearLayout columns = new LinearLayout(this);
-            columns.setOrientation(LinearLayout.HORIZONTAL);
-            columns.setPadding(
-                    dp(TabletLayout.pagePaddingH(layoutTier)),
-                    dp(TabletLayout.headerBottomGapDp(layoutTier)),
-                    dp(TabletLayout.pagePaddingH(layoutTier)),
-                    0);
-            if (TabletLayout.useConfigThreeColumns(layoutTier)) {
-                columns.addView(configColumnScroll(connection, probe),
-                        new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-                columns.addView(space(dp(TabletLayout.columnGapDp(layoutTier)), 1));
-                columns.addView(configColumnScroll(mode, weakNet),
-                        new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-                columns.addView(space(dp(TabletLayout.columnGapDp(layoutTier)), 1));
-                columns.addView(configColumnScroll(mqtt),
-                        new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-            } else {
-                columns.addView(configColumnScroll(connection, probe, mode, weakNet),
-                        new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-                columns.addView(space(dp(TabletLayout.columnGapDp(layoutTier)), 1));
-                columns.addView(configColumnScroll(mqtt),
-                        new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-            }
-            page.addView(columns, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-            page.addView(wrapStickyFooter(footer));
-            return page;
-        }
-
-        LinearLayout scrollRoot = new LinearLayout(this);
-        scrollRoot.setOrientation(LinearLayout.VERTICAL);
-        scrollRoot.setPadding(
-                dp(TabletLayout.pagePaddingH(layoutTier)),
-                dp(TabletLayout.pagePaddingV(layoutTier)),
-                dp(TabletLayout.pagePaddingH(layoutTier)),
-                dp(TabletLayout.configScrollBottomPaddingDp(layoutTier)));
-        scrollRoot.addView(header(historyLink, helpLink));
-        scrollRoot.addView(connection);
-        scrollRoot.addView(probe);
-        scrollRoot.addView(mode);
-        scrollRoot.addView(weakNet);
-        scrollRoot.addView(mqtt);
-        return stickyFooterPage(scrollRoot, footer);
-    }
 
     private View configStartFooter(Button start) {
         LinearLayout actions = new LinearLayout(this);
@@ -1202,10 +1128,10 @@ public final class MainActivity extends Activity {
     }
 
     private void openHistory() {
-        if (flow.page() != ProbeFlowState.Page.CONFIG) {
+        if (session.flow().page() != ProbeFlowState.Page.CONFIG) {
             return;
         }
-        if (!ensureStoragePermission(false)) {
+        if (!ensureStoragePermission(PENDING_EXPORT_NONE)) {
             Toast.makeText(this, "请授予存储权限以读取 Download 中的历史记录", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -1289,14 +1215,14 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
-    private boolean ensureStoragePermission(boolean forExport) {
+    private boolean ensureStoragePermission(int exportKind) {
         if (!ProbeStorage.needsLegacyStoragePermission()) {
             return true;
         }
         if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
             return true;
         }
-        pendingExportAfterPermission = forExport;
+        pendingExportKind = exportKind;
         requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
         return false;
     }
@@ -1393,61 +1319,8 @@ public final class MainActivity extends Activity {
         return badge;
     }
 
-    private View buildMonitorPage() {
-        stopButton = primaryCtaButton("停止测试", RED);
-        viewResultButton = primaryCtaButton("查看测试结果", BLUE);
-        viewResultButton.setVisibility(View.GONE);
-        viewResultButton.setOnClickListener(v -> confirmShowResult());
 
-        LinearLayout btnRow = new LinearLayout(this);
-        btnRow.setOrientation(LinearLayout.HORIZONTAL);
-        int monitorBtnH = primaryButtonHeight();
-        btnRow.addView(stopButton, new LinearLayout.LayoutParams(0, monitorBtnH, 1f));
-        monitorBtnSpacer = space(dp(12), 1);
-        btnRow.addView(monitorBtnSpacer);
-        btnRow.addView(viewResultButton, new LinearLayout.LayoutParams(0, monitorBtnH, 1f));
-
-        responderCard = responderCard();
-        monitorRttCard = rttChartSectionCard("RTT 趋势", chartHeader(), chartView());
-        monitorPacketRecordsCard = packetRecordsCard();
-        monitorEventLogCard = eventLogCard();
-
-        LinearLayout scrollRoot = new LinearLayout(this);
-        scrollRoot.setOrientation(LinearLayout.VERTICAL);
-        int pagePadH = dp(TabletLayout.pagePaddingH(layoutTier));
-        int stepInset = Math.max(0,
-                dp(TabletLayout.stepBadgeContentInsetDp(layoutTier)) - pagePadH);
-        scrollRoot.setPadding(
-                pagePadH + stepInset,
-                dp(TabletLayout.pagePaddingV(layoutTier)),
-                pagePadH,
-                dp(TabletLayout.pagePaddingBottom(layoutTier)));
-
-        monitorTitleView = text("运行监测", TabletLayout.pageTitleSp(layoutTier), INK, Typeface.BOLD);
-        scrollRoot.addView(monitorTitleView);
-        monitorSubtitleView = smallText("实时查看链路质量与逐包状态", MUTED, Typeface.NORMAL);
-        monitorSubtitleView.setPadding(0, dp(4), 0, dp(TabletLayout.pageSubtitleBottomDp(layoutTier)));
-        scrollRoot.addView(monitorSubtitleView);
-
-        monitorConfigCardView = monitorConfigCard();
-        scrollRoot.addView(monitorConfigCardView);
-
-        monitorStatusPill = statusPill();
-        monitorMetricCards = metricCards();
-        monitorOverviewCard = overviewCard();
-
-        monitorProbePanel = buildMonitorProbePanel();
-        monitorResponderPanel = buildMonitorResponderPanel();
-        applyMonitorSectionGap(monitorProbePanel);
-        scrollRoot.addView(monitorProbePanel);
-        applyMonitorSectionGap(monitorResponderPanel);
-        scrollRoot.addView(monitorResponderPanel);
-        applyMonitorSectionGap(monitorEventLogCard);
-        scrollRoot.addView(monitorEventLogCard);
-
-        return stickyFooterPage(scrollRoot, btnRow);
-    }
-
+    // ----- RUNNING UI 辅助：图表、指标卡片、事件日志、回显面板 -----
     private View buildMonitorProbePanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -1720,7 +1593,7 @@ public final class MainActivity extends Activity {
     // 探测端显示完整 RTT 卡片；回显端只显示回显状态卡与事件日志。
     private void setMonitorMode(boolean responder) {
         responderRunMode = responder;
-        applyMonitorIntroVisibility(flow.page() == ProbeFlowState.Page.RUNNING);
+        applyMonitorIntroVisibility(session.flow().page() == ProbeFlowState.Page.RUNNING);
         if (monitorProbePanel != null) {
             monitorProbePanel.setVisibility(responder ? View.GONE : View.VISIBLE);
         }
@@ -1753,86 +1626,8 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private View buildResultPage() {
-        exportButton = button("再次导出", Palette.NEUTRAL_DARK, Color.WHITE);
-        exportButton.setOnClickListener(v -> exportLastRun(true));
-        retestButton = button("再次测试", Palette.SURFACE_SUBTLE, INK);
-        retestButton.setOnClickListener(v -> resetForRetest());
-        View footer = resultActionFooter(exportButton, retestButton);
 
-        LinearLayout scrollRoot = new LinearLayout(this);
-        scrollRoot.setOrientation(LinearLayout.VERTICAL);
-        scrollRoot.setPadding(
-                dp(TabletLayout.pagePaddingH(layoutTier)),
-                dp(TabletLayout.pagePaddingV(layoutTier)),
-                dp(TabletLayout.pagePaddingH(layoutTier)),
-                dp(TabletLayout.pagePaddingBottom(layoutTier)));
-
-        TextView title = text("测试结果", TabletLayout.pageTitleLargeSp(layoutTier), BLUE, Typeface.BOLD);
-        title.setPadding(dp(2), 0, dp(2), dp(TabletLayout.headerBottomGapDp(layoutTier)));
-        scrollRoot.addView(title);
-
-        resultStatusView = text("暂无测试结果", 15, MUTED, Typeface.BOLD);
-        resultStatusView.setPadding(dp(16), dp(14), dp(16), dp(14));
-        resultStatusView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
-        scrollRoot.addView(resultStatusView, matchWrap());
-
-        resultConfigCard = buildConfigSummaryCard("本次配置", resultConfigViews);
-        scrollRoot.addView(resultConfigCard);
-
-        LinearLayout metricsWrap = new LinearLayout(this);
-        metricsWrap.setOrientation(LinearLayout.VERTICAL);
-        metricsWrap.setLayoutParams(matchWrap());
-        metricsWrap.addView(resultPrimaryMetricGrid());
-        metricsWrap.addView(resultSecondaryMetricGrid());
-        resultProbeMetricsPanel = metricsWrap;
-        scrollRoot.addView(resultProbeMetricsPanel);
-
-        resultResponderPanel = buildResponderResultPanel();
-        resultResponderPanel.setVisibility(View.GONE);
-        scrollRoot.addView(resultResponderPanel);
-
-        resultSummaryView = new TextView(this);
-        resultSummaryView.setTextSize(13);
-        resultSummaryView.setTextColor(INK);
-        resultSummaryView.setPadding(dp(14), dp(14), dp(14), dp(14));
-        resultSummaryView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
-        resultSummaryView.setText("暂无测试结果，请先运行一次测试");
-        resultSummaryView.setVisibility(View.GONE);
-        scrollRoot.addView(resultSummaryView, matchWrap());
-
-        compareView = new LinearLayout(this);
-        compareView.setOrientation(LinearLayout.VERTICAL);
-        compareView.setPadding(dp(14), dp(12), dp(14), dp(12));
-        compareView.setBackground(rounded(Palette.SURFACE, LINE, 12));
-        compareVerdictView = text("加速对比", 13, MUTED, Typeface.BOLD);
-        compareView.addView(compareVerdictView);
-        comparePrevView = smallText("", MUTED, Typeface.NORMAL);
-        comparePrevView.setPadding(0, dp(8), 0, 0);
-        compareView.addView(comparePrevView);
-        compareCurrView = text("", 13, INK, Typeface.BOLD);
-        compareCurrView.setPadding(0, dp(4), 0, 0);
-        compareView.addView(compareCurrView);
-        compareDeltaView = smallText("", BLUE, Typeface.NORMAL);
-        compareDeltaView.setPadding(0, dp(8), 0, 0);
-        compareView.addView(compareDeltaView);
-        LinearLayout.LayoutParams cmp = matchWrap();
-        cmp.topMargin = dp(12);
-        compareView.setLayoutParams(cmp);
-        compareView.setVisibility(View.GONE);
-        scrollRoot.addView(compareView);
-
-        exportView = smallText("", MUTED, Typeface.NORMAL);
-        exportView.setPadding(dp(14), dp(14), dp(14), dp(14));
-        exportView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
-        LinearLayout.LayoutParams expParams = matchWrap();
-        expParams.topMargin = dp(12);
-        exportView.setLayoutParams(expParams);
-        scrollRoot.addView(exportView);
-
-        return stickyFooterPage(scrollRoot, footer);
-    }
-
+    // ----- RESULT UI 辅助：结果指标卡片、回显结果面板 -----
     private View resultActionFooter(Button export, Button retest) {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -1962,33 +1757,6 @@ public final class MainActivity extends Activity {
         return valueView;
     }
 
-    private String formatCompareDelta(String name, double prev, double curr, String unit) {
-        if (prev <= 0 && curr <= 0) {
-            return name + " ±0" + unit;
-        }
-        if (prev <= 0) {
-            return String.format(Locale.US, "%s %.0f%s", name, curr, unit);
-        }
-        double pct = (curr - prev) / prev * 100;
-        return String.format(Locale.US, "%s %+.0f%%", name, pct);
-    }
-
-    private String formatLossCompareDelta(double prevRate, double currRate) {
-        if (prevRate <= 0 && currRate <= 0) {
-            return "丢包 ±0%";
-        }
-        if (prevRate <= 0) {
-            return String.format(Locale.US, "丢包 %.1f%%", currRate * 100);
-        }
-        double pct = (currRate - prevRate) / prevRate * 100;
-        return String.format(Locale.US, "丢包 %+.0f%%", pct);
-    }
-
-    private String compareMetricLine(String tag, ProbeMetrics metrics) {
-        return String.format(Locale.US, "%s  Avg %.0fms · P95 %.0fms · 丢包 %.1f%% · 发 %d",
-                tag, metrics.avgRttMs, metrics.p95RttMs, metrics.lossRate * 100, metrics.sent);
-    }
-
     private void populateResultPage(ProbeFlowState.Outcome outcome, String message, ProbeMetrics metrics) {
         if (resultStatusView == null || metrics == null) return;
         boolean responder = lastConfig != null && lastConfig.mqttRole == ProbeConfig.Role.RESPONDER;
@@ -2097,6 +1865,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    // ----- CONFIG UI 辅助：连接/发包/模式/弱网/MQTT 表单区块 -----
     private View configConnectionSection() {
         activeFieldTheme = Palette.SECTION_CONNECTION;
         LinearLayout card = sectionPanel(Palette.SECTION_CONNECTION, true);
@@ -2147,12 +1916,14 @@ public final class MainActivity extends Activity {
         LinearLayout card = sectionPanel(Palette.SECTION_PROBE, false);
         card.addView(sectionTitle("探测参数", "发包数量、速率与超时", Palette.SECTION_PROBE));
 
-        countInput = compactNumericInput(ProbeDefaults.COUNT, "发包数", COUNT_MIN, COUNT_MAX);
-        ppsInput = compactNumericInput(ProbeDefaults.PPS, "速率(包/秒)", PPS_MIN, PPS_MAX);
+        countInput = compactNumericInput(ProbeDefaults.COUNT, "发包数",
+                ProbeConstants.Limits.COUNT_MIN_PKT, ProbeConstants.Limits.COUNT_MAX_PKT);
+        ppsInput = compactNumericInput(ProbeDefaults.PPS, "速率(包/秒)",
+                ProbeConstants.Limits.PPS_MIN, ProbeConstants.Limits.PPS_MAX);
         packetBytesInput = compactNumericInput(ProbeDefaults.PACKET_BYTES, "包大小(字节)",
-                PACKET_BYTES_MIN, PACKET_BYTES_MAX);
+                ProbeConstants.Limits.PACKET_BYTES_MIN_B, ProbeConstants.Limits.PACKET_BYTES_MAX_B);
         timeoutInput = compactNumericInput(ProbeDefaults.TIMEOUT_MS, "超时(ms)",
-                TIMEOUT_MS_MIN, TIMEOUT_MS_MAX);
+                ProbeConstants.Limits.TIMEOUT_MS_MIN, ProbeConstants.Limits.TIMEOUT_MS_MAX);
 
         card.addView(presetSwitchRow());
 
@@ -2966,289 +2737,10 @@ public final class MainActivity extends Activity {
         return field;
     }
 
-    private void startProbe() {
-        startButton.setEnabled(false);
-        startButton.setAlpha(0.6f);
-        startButton.setText("正在校验…");
-        try {
-            clearFieldErrors();
-            refreshVpnState();
-            boolean vpnActive = VpnState.isVpnActive(this);
-            ProbeConfig.Protocol protocol = selectedProtocol();
-            ProbeConfig.Role role = protocol == ProbeConfig.Protocol.MQTT
-                    ? selectedMqttRole() : ProbeConfig.Role.PROBE;
-            validateProtocolConfig(protocol);
-            lastConfig = new ProbeConfig(
-                    protocol,
-                    selectedHost(),
-                    parsePort(protocol),
-                    parseInt(countInput, "发包数量", COUNT_MIN, COUNT_MAX),
-                    parseInt(ppsInput, "每秒发包数", PPS_MIN, PPS_MAX),
-                    parseInt(packetBytesInput, "数据包大小", PACKET_BYTES_MIN, PACKET_BYTES_MAX),
-                    parseInt(timeoutInput, "超时时间", TIMEOUT_MS_MIN, TIMEOUT_MS_MAX),
-                    modeSpinner.getSelectedItem().toString(),
-                    UUID.randomUUID().toString().replace("-", "").substring(0, 12),
-                    vpnActive,
-                    mqttClientIdInput.getText().toString().trim(),
-                    mqttPublishTopicInput.getText().toString().trim(),
-                    mqttSubscribeTopicInput.getText().toString().trim(),
-                    mqttUsernameInput.getText().toString().trim(),
-                    currentMqttToken(),
-                    mqttEnvInput.getText().toString().trim(),
-                    mqttDevicePwdInput.getText().toString(),
-                    mqttDeviceMacInput.getText().toString().trim(),
-                    role,
-                    readWeakNetProfile()
-            );
-            saveCurrentConfig();
-            runner = createRunner(protocol, role);
-            lastSamples = new ArrayList<>();
-            lastMetrics = ProbeMetrics.empty();
-            lastPerfStats = null;
-            lastRecvStats = null;
-            lastEchoRecords = null;
-            scopeViewport.reset();
-        refreshChartModeToggle();
-            if (packetRecordView != null) packetRecordView.setText("");
-            lastChartUpdateMs = 0;
-            updateMetrics(lastMetrics, lastSamples);
-            exportView.setText("");
-            if (!flow.begin(lastConfig.runId)) {
-                throw new IllegalStateException("当前已有测试正在运行");
-            }
-            stopRequested = false;
-            cancelRequested = false;
-            eventLogFollowLatest = true;
-            clearEventLog();
-            boolean responder = role == ProbeConfig.Role.RESPONDER;
-            setMonitorMode(responder);
-            refreshMonitorConfig(lastConfig);
-            if (responder) {
-                appendEvent("正在以回显端连接 " + lastConfig.host + ":" + lastConfig.port + "…");
-                if (responderCountView != null) responderCountView.setText("0");
-                if (responderReceivedView != null) responderReceivedView.setText("0");
-                if (responderEchoedView != null) responderEchoedView.setText("0");
-                if (stopButton != null) stopButton.setText("停止回显");
-            } else {
-                appendEvent("正在连接 " + lastConfig.host + ":" + lastConfig.port + "…");
-                if (lastConfig.weakNetProfile.isActive()) {
-                    appendEvent("弱网模拟: " + lastConfig.weakNetProfile.displaySummary());
-                }
-                if (stopButton != null) stopButton.setText("停止测试");
-            }
-            if (metricsLineView != null) metricsLineView.setText("");
-            setMonitorFinishedControls(false);
-            setButtons(true);
-            renderPage();
-            String runId = lastConfig.runId;
-            runner.start(lastConfig, new ProbeCallback() {
-                @Override
-                public void onEvent(String message) {
-                    runOnUiThread(() -> {
-                        if (flow.accepts(runId)) appendEvent(message);
-                    });
-                }
-
-                @Override
-                public void onMetrics(ProbeMetrics metrics, List<ProbeSample> samples) {
-                    runOnUiThread(() -> {
-                        if (!flow.accepts(runId)) return;
-                        updateMetrics(metrics, samples);
-                        if (!responder) {
-                            updateMetricsLine(metrics);
-                        }
-                    });
-                }
-
-                @Override
-                public void onPerfStats(ProbePerfStats stats) {
-                    runOnUiThread(() -> {
-                        if (flow.accepts(runId)) lastPerfStats = stats;
-                    });
-                }
-
-                @Override
-                public void onRecvStats(ProbeRecvStats stats) {
-                    runOnUiThread(() -> {
-                        if (flow.accepts(runId)) lastRecvStats = stats;
-                    });
-                }
-
-                @Override
-                public void onEchoRecords(List<EchoRecord> records) {
-                    runOnUiThread(() -> {
-                        if (flow.accepts(runId)) lastEchoRecords = records;
-                    });
-                }
-
-                @Override
-                public void onFinished(ProbeMetrics metrics, List<ProbeSample> samples) {
-                    runOnUiThread(() -> {
-                        if (!flow.accepts(runId)) return;
-                        if (cancelRequested) {
-                            cancelRun(runId);
-                            return;
-                        }
-                        boolean responder = lastConfig != null
-                                && lastConfig.mqttRole == ProbeConfig.Role.RESPONDER;
-                        if (responder) {
-                            ProbeFlowState.Outcome outcome = stopRequested
-                                    ? ProbeFlowState.Outcome.STOPPED
-                                    : ProbeFlowState.Outcome.COMPLETED;
-                            String message = stopRequested ? "回显由用户停止" : null;
-                            finishRun(runId, outcome, message, metrics, samples);
-                            return;
-                        }
-                        if (stopRequested) {
-                            finishRun(runId, ProbeFlowState.Outcome.STOPPED, "测试由用户停止",
-                                    metrics, samples);
-                            return;
-                        }
-                        completeRunPendingConfirm(runId, metrics, samples);
-                    });
-                }
-
-                @Override
-                public void onFailed(Throwable error, ProbeMetrics metrics, List<ProbeSample> samples) {
-                    runOnUiThread(() -> {
-                        if (!flow.accepts(runId)) return;
-                        if (cancelRequested) {
-                            cancelRun(runId);
-                            return;
-                        }
-                        finishRun(runId, ProbeFlowState.Outcome.FAILED,
-                                ProbeErrorMessage.from(error), metrics, samples);
-                    });
-                }
-            });
-        } catch (Exception exc) {
-            String message = exc.getMessage() == null ? "无法开始测试，请检查参数" : exc.getMessage();
-            if (flow.page() == ProbeFlowState.Page.RUNNING) {
-                finishRun(flow.activeRunId(), ProbeFlowState.Outcome.FAILED, message,
-                        lastMetrics, new ArrayList<>(lastSamples));
-            } else {
-                startButton.setEnabled(true);
-                startButton.setAlpha(1f);
-                startButton.setText("开始测试");
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-            }
-        }
-    }
-
-    private void confirmStopAndShowResult() {
-        if (flow.page() != ProbeFlowState.Page.RUNNING || stopRequested || cancelRequested) return;
-        new AlertDialog.Builder(this)
-                .setTitle("停止当前测试？")
-                .setMessage("可停止并查看已采集结果，或取消本次测试（不保存记录，返回参数设置）。")
-                .setNegativeButton("继续测试", null)
-                .setNeutralButton("取消测试", (dialog, which) -> requestCancel())
-                .setPositiveButton("停止并查看结果", (dialog, which) -> requestStop())
-                .show();
-    }
-
-    private void requestStop() {
-        if (stopRequested || cancelRequested || flow.page() != ProbeFlowState.Page.RUNNING) return;
-        stopRequested = true;
-        String runId = flow.activeRunId();
-        setRunningUi(false, "正在停止…");
-        if (runner != null) runner.stop();
-        // 探测端/回显端均须等 Runner.onFinished（finalResult=true）再结算，避免丢包与 perf 统计错误。
-    }
-
-    private void requestCancel() {
-        if (cancelRequested || stopRequested || flow.page() != ProbeFlowState.Page.RUNNING) return;
-        cancelRequested = true;
-        setRunningUi(false, "正在取消…");
-        if (runner != null) runner.stop();
-    }
-
-    private void cancelRun(String runId) {
-        if (!flow.accepts(runId)) return;
-        runner = null;
-        resetForRetest();
-        Toast.makeText(this, "已取消，未保存测试记录", Toast.LENGTH_SHORT).show();
-    }
-
-    private void finishRun(String runId, ProbeFlowState.Outcome outcome, String message,
-                           ProbeMetrics metrics, List<ProbeSample> samples) {
-        if (!flow.finish(runId, outcome, message)) return;
-        if (outcome == ProbeFlowState.Outcome.STOPPED) {
-            lastChartUpdateMs = 0;
-        }
-        updateMetrics(metrics == null ? ProbeMetrics.empty() : metrics,
-                samples == null ? new ArrayList<>() : samples);
-        applyResultPage(outcome, message);
-        setMonitorFinishedControls(false);
-        runner = null;
-        renderPage();
-    }
-
-    // 测试自然完成：先停留在运行页，提供“查看测试结果”按钮，由用户确认后跳转
-    private void completeRunPendingConfirm(String runId, ProbeMetrics metrics, List<ProbeSample> samples) {
-        if (!flow.completePending(runId, ProbeFlowState.Outcome.COMPLETED, null)) return;
-        lastChartUpdateMs = 0; // 绕过节流，确保完成时图表展示完整数据
-        updateMetrics(metrics == null ? ProbeMetrics.empty() : metrics,
-                samples == null ? new ArrayList<>() : samples);
-        updateMetricsLine(lastMetrics);
-        runner = null;
-        setMonitorFinishedControls(true);
-        appendEvent("测试已完成，点击下方「查看测试结果」查看详情。");
-    }
-
-    private void confirmShowResult() {
-        if (!flow.confirmResult()) return;
-        applyResultPage(flow.outcome(), flow.message());
-        setMonitorFinishedControls(false);
-        renderPage();
-    }
-
-    private void applyResultPage(ProbeFlowState.Outcome outcome, String message) {
-        setButtons(false);
-        populateResultPage(outcome, message, lastMetrics);
-        boolean responder = lastConfig != null && lastConfig.mqttRole == ProbeConfig.Role.RESPONDER;
-        if (!responder && outcome != ProbeFlowState.Outcome.FAILED && lastMetrics.sent > 0) {
-            autoCompareWithHistory(lastMetrics, lastConfig);
-        } else if (compareView != null) {
-            compareView.setVisibility(View.GONE);
-        }
-        if (!responder) {
-            exportLastRun(false);
-            if (exportView != null) exportView.setVisibility(View.VISIBLE);
-        } else {
-            exportEchoRun();
-        }
-    }
-
-    /** 回显端结束时自动导出去程到达记录（echo_received.csv），供方向级丢包对齐。 */
-    private void exportEchoRun() {
-        if (exportView == null) {
-            return;
-        }
-        if (lastConfig == null || lastEchoRecords == null || lastEchoRecords.isEmpty()) {
-            exportView.setVisibility(View.GONE);
-            return;
-        }
-        if (!ensureStoragePermission(true)) {
-            exportView.setVisibility(View.VISIBLE);
-            exportView.setText("请授予存储权限以导出回显记录到 Download 目录");
-            return;
-        }
-        try {
-            File file = ProbeStorage.writeEchoRun(this, lastConfig, new ArrayList<>(lastEchoRecords));
-            exportView.setVisibility(View.VISIBLE);
-            exportView.setText("回显记录已导出至 " + ProbeStorage.downloadsDisplayPath() + "/"
-                    + file.getParentFile().getName() + "/\n" + file.getName()
-                    + "（" + lastEchoRecords.size() + " 条去程到达，供方向级丢包对齐）");
-        } catch (Exception exc) {
-            exportView.setVisibility(View.VISIBLE);
-            exportView.setText("回显记录导出失败: " + exc.getMessage());
-        }
-    }
-
+    // ----- RUNNING 运行时：指标刷新、事件日志（编排见 RunningPageSection）-----
     private void resetForRetest() {
-        flow.resetForRetest();
-        stopRequested = false;
-        cancelRequested = false;
+        session.flow().resetForRetest();
+        session.resetFlags();
         clearFieldErrors();
         eventLogFollowLatest = true;
         clearEventLog();
@@ -3298,7 +2790,7 @@ public final class MainActivity extends Activity {
             packetRecordView.setText("等待采集数据…");
             return;
         }
-        int limit = 200;
+        int limit = ProbeConstants.Ui.PACKET_RECORD_DISPLAY_LIMIT_PKT;
         int maxSeq = 0;
         for (ProbeSample sample : samples) {
             if (sample.seq > maxSeq) {
@@ -3314,7 +2806,8 @@ public final class MainActivity extends Activity {
         }
         Collections.sort(recent, (a, b) -> Integer.compare(b.seq, a.seq));
         long nowNs = System.nanoTime();
-        long timeoutNs = (lastConfig != null ? lastConfig.timeoutMs : 1500) * 1_000_000L;
+        long timeoutNs = (lastConfig != null ? lastConfig.timeoutMs
+                : ProbeConstants.Timing.LEGACY_SUMMARY_DEFAULT_TIMEOUT_MS) * ProbeConstants.Units.NS_PER_MS;
         StringBuilder sb = new StringBuilder();
         int count = Math.min(limit, recent.size());
         for (int i = 0; i < count; i++) {
@@ -3329,7 +2822,8 @@ public final class MainActivity extends Activity {
                 }
             } else if (lastMetrics.finalResult || nowNs - sample.clientSendNs > timeoutNs) {
                 status = "丢       —";
-            } else if (stopRequested || flow.outcome() == ProbeFlowState.Outcome.STOPPED) {
+            } else if (session.isStopRequested()
+                    || session.flow().outcome() == ProbeFlowState.Outcome.STOPPED) {
                 status = "未确认  —";
             } else {
                 status = "在途     …";
@@ -3396,54 +2890,23 @@ public final class MainActivity extends Activity {
 
         // 图表刷新与探测线程解耦：仅主线程绘制，且节流避免抢占 MQTT 回调
         long nowMs = System.currentTimeMillis();
-        if (nowMs - lastChartUpdateMs >= 400) {
-            long tms = lastConfig != null ? lastConfig.timeoutMs : 1500;
-            boolean stoppedEarly = stopRequested || flow.outcome() == ProbeFlowState.Outcome.STOPPED;
+        if (nowMs - lastChartUpdateMs >= ProbeConstants.Ui.CHART_REFRESH_MIN_INTERVAL_MS) {
+            long tms = lastConfig != null ? lastConfig.timeoutMs
+                    : ProbeConstants.Timing.LEGACY_SUMMARY_DEFAULT_TIMEOUT_MS;
+            boolean stoppedEarly = session.isStopRequested()
+                    || session.flow().outcome() == ProbeFlowState.Outcome.STOPPED;
             chartView.update(samples, metrics, tms, stoppedEarly);
             scopeViewport.setFollowAnchorSeq(computeLastReceivedSeq(samples));
             scopeViewport.setTotalPoints(computeTotalPoints(samples));
             refreshChartModeToggle();
             lastChartUpdateMs = nowMs;
         }
-        if (nowMs - lastPacketRecordUpdateMs >= 1000) {
+        if (nowMs - lastPacketRecordUpdateMs >= ProbeConstants.Ui.PACKET_RECORD_REFRESH_MIN_INTERVAL_MS) {
             updatePacketRecords(samples);
             lastPacketRecordUpdateMs = nowMs;
         }
     }
 
-    private void exportLastRun(boolean userInitiated) {
-        if (lastConfig == null || lastSamples.isEmpty()) {
-            exportView.setText("暂无可导出的采样数据");
-            exportButton.setEnabled(false);
-            exportButton.setAlpha(0.45f);
-            if (userInitiated) Toast.makeText(this, "暂无可导出的采样数据", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (!ensureStoragePermission(true)) {
-            if (userInitiated) {
-                Toast.makeText(this, "请授予存储权限以导出到 Download 目录", Toast.LENGTH_SHORT).show();
-            }
-            return;
-        }
-        try {
-            File[] files = ProbeStorage.writeRun(this, lastConfig, lastMetrics, new ArrayList<>(lastSamples),
-                    lastPerfStats, lastRecvStats);
-            exportView.setText("已导出至 " + ProbeStorage.downloadsDisplayPath() + "/"
-                    + files[0].getParentFile().getName() + "/\n"
-                    + "CSV: " + files[0].getName() + "\n"
-                    + "Summary: " + files[1].getName());
-            exportButton.setText("再次导出");
-            exportButton.setEnabled(true);
-            exportButton.setAlpha(1f);
-        } catch (Exception exc) {
-            String message = "导出失败: " + exc.getMessage();
-            exportView.setText(message);
-            exportButton.setText("重试导出");
-            exportButton.setEnabled(true);
-            exportButton.setAlpha(1f);
-            if (userInitiated) Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-        }
-    }
 
     private void refreshVpnState() {
         // VPN 覆盖状态仍记录到 ProbeConfig.vpnActiveAtStart，但不再在状态栏显示
@@ -3828,17 +3291,18 @@ public final class MainActivity extends Activity {
             portInput.setError(null);
             return defaultPortFor(protocol);
         }
-        return parseInt(portInput, "端口", 1, 65535);
+        return parseInt(portInput, "端口",
+                ProbeConstants.Limits.PORT_MIN, ProbeConstants.Limits.PORT_MAX);
     }
 
     private int defaultPortFor(ProbeConfig.Protocol protocol) {
         if (protocol == ProbeConfig.Protocol.TCP) {
-            return 9002;
+            return ProbeConstants.Network.TCP_ECHO_PORT;
         }
         if (protocol == ProbeConfig.Protocol.MQTT) {
-            return Integer.parseInt(MqttRelayServerCatalog.PORT);
+            return ProbeConstants.Network.MQTT_BROKER_PORT;
         }
-        return 9001;
+        return ProbeConstants.Network.UDP_ECHO_PORT;
     }
 
     private void setButtons(boolean running) {
@@ -3893,225 +3357,6 @@ public final class MainActivity extends Activity {
         refreshConfigHeaderChips();
     }
 
-    private void updateCompare(ProbeMetrics current, ProbeConfig cfg) {
-        if (compareView == null || compareVerdictView == null || current == null || cfg == null) return;
-        if (current.sent == 0) return;
-
-        if (prevMetrics == null) {
-            prevMetrics = current;
-            prevConfig = cfg;
-            compareVerdictView.setText("加速对比");
-            comparePrevView.setText("基准已记录 · " + compareMetricLine("[" + cfg.modeTag + "]", current));
-            compareCurrView.setText("切换模式后再测，即可查看对比");
-            compareDeltaView.setText("");
-            compareView.setBackground(rounded(Palette.SURFACE, LINE, 12));
-            compareView.setVisibility(View.VISIBLE);
-            return;
-        }
-
-        String prevTag = prevConfig != null ? prevConfig.modeTag : "上次";
-        String currTag = cfg.modeTag;
-        comparePrevView.setText("上次 · " + compareMetricLine("[" + prevTag + "]", prevMetrics));
-        compareCurrView.setText("本次 · " + compareMetricLine("[" + currTag + "]", current));
-
-        double avgPct = prevMetrics.avgRttMs > 0
-                ? (current.avgRttMs - prevMetrics.avgRttMs) / prevMetrics.avgRttMs * 100 : 0;
-        double p95Pct = prevMetrics.p95RttMs > 0
-                ? (current.p95RttMs - prevMetrics.p95RttMs) / prevMetrics.p95RttMs * 100 : 0;
-        double p99Pct = prevMetrics.p99RttMs > 0
-                ? (current.p99RttMs - prevMetrics.p99RttMs) / prevMetrics.p99RttMs * 100 : 0;
-        boolean lossComputable = prevMetrics.lossRate > 0;
-        double lossPct = lossComputable
-                ? (current.lossRate - prevMetrics.lossRate) / prevMetrics.lossRate * 100
-                : (current.lossRate > 0 ? 999 : 0);
-
-        String verdict;
-        int subtle;
-        int border;
-        int minSamples = 50;
-        if (current.sent < minSamples || prevMetrics.sent < minSamples) {
-            verdict = "样本不足（建议每组 ≥ " + minSamples + " 包）";
-            subtle = Palette.WARNING_SUBTLE;
-            border = Palette.WARNING_BORDER;
-        } else if (lossPct > 10 || p95Pct > 10 || p99Pct > 10) {
-            verdict = "负向效果";
-            subtle = Palette.DANGER_SUBTLE;
-            border = Palette.DANGER_BORDER;
-        } else if ((lossPct <= -50 || p95Pct <= -10) && p99Pct <= 10) {
-            verdict = "明显改善";
-            subtle = Palette.SUCCESS_SUBTLE;
-            border = Palette.SUCCESS_BORDER;
-        } else if (avgPct < -5 || p95Pct < -5 || lossPct < -5) {
-            verdict = "部分改善";
-            subtle = Palette.SUCCESS_SUBTLE;
-            border = Palette.SUCCESS_BORDER;
-        } else {
-            verdict = "无明显效果";
-            subtle = Palette.SURFACE;
-            border = LINE;
-        }
-
-        compareVerdictView.setText("加速对比 · " + verdict);
-        compareDeltaView.setText(String.format(Locale.US, "%s · %s · %s · %s",
-                formatCompareDelta("Avg", prevMetrics.avgRttMs, current.avgRttMs, "ms"),
-                formatCompareDelta("P95", prevMetrics.p95RttMs, current.p95RttMs, "ms"),
-                formatCompareDelta("P99", prevMetrics.p99RttMs, current.p99RttMs, "ms"),
-                formatLossCompareDelta(prevMetrics.lossRate, current.lossRate)));
-        compareView.setBackground(rounded(subtle, border, 12));
-        compareView.setVisibility(View.VISIBLE);
-        prevMetrics = current;
-        prevConfig = cfg;
-    }
-
-    private boolean isAccelMode(String modeTag) {
-        return "云聚通加速".equals(modeTag) || "弱网加速".equals(modeTag);
-    }
-
-    /** 返回配对的对立模式：基线 ↔ 加速。用于自动从历史里找对照轮。 */
-    private String oppositeMode(String modeTag) {
-        if (modeTag == null) {
-            return null;
-        }
-        switch (modeTag) {
-            case "未加速":
-                return "云聚通加速";
-            case "云聚通加速":
-                return "未加速";
-            case "弱网基线":
-                return "弱网加速";
-            case "弱网加速":
-                return "弱网基线";
-            default:
-                return null;
-        }
-    }
-
-    private static boolean matchesHistoryHost(ProbeRunRecord record, ProbeConfig cfg) {
-        return record.host != null && cfg.host != null && record.host.equals(cfg.host);
-    }
-
-    /** 历史 index 可能缺少 weakNetSummary；此时仅在与当前无弱网模拟时配对。 */
-    private static boolean matchesHistoryWeakNet(ProbeRunRecord record, ProbeConfig cfg) {
-        String current = cfg.weakNetProfile.displaySummary();
-        String recorded = record.weakNetSummary == null ? "" : record.weakNetSummary;
-        if (recorded.isEmpty()) {
-            return !cfg.weakNetProfile.isActive();
-        }
-        return recorded.equals(current);
-    }
-
-    private ProbeMetrics metricsFromRecord(ProbeRunRecord record) {
-        return new ProbeMetrics(record.sent, record.received, record.lost, 0, 0, record.maxBurstLoss,
-                record.lossRate, record.avgRttMs, 0.0, record.p95RttMs, record.p99RttMs,
-                0.0, 0.0, record.jitterMs, 0.0, true);
-    }
-
-    /**
-     * 结果页自动从本地历史里按 协议 + 发包数 + host + 弱网 Profile + 对立 modeTag 找最近一条作对照。
-     * 找不到匹配则退回会话内"上次 vs 本次"对比。
-     */
-    private void autoCompareWithHistory(ProbeMetrics current, ProbeConfig cfg) {
-        if (compareView == null || compareVerdictView == null || cfg == null
-                || current == null || current.sent == 0) {
-            return;
-        }
-        String opposite = oppositeMode(cfg.modeTag);
-        ProbeRunRecord baseline = null;
-        if (opposite != null) {
-            List<ProbeRunRecord> runs;
-            try {
-                runs = ProbeStorage.listRuns(this);
-            } catch (Exception exc) {
-                runs = new ArrayList<>();
-            }
-            for (ProbeRunRecord record : runs) {
-                if (record == null || record.protocol == null) {
-                    continue;
-                }
-                if (!record.protocol.equals(cfg.protocol.label)) {
-                    continue;
-                }
-                if (record.count != cfg.count) {
-                    continue;
-                }
-                if (!opposite.equals(record.modeTag)) {
-                    continue;
-                }
-                if (!matchesHistoryHost(record, cfg)) {
-                    continue;
-                }
-                if (!matchesHistoryWeakNet(record, cfg)) {
-                    continue;
-                }
-                if (baseline == null || (record.exportStamp != null
-                        && record.exportStamp.compareTo(baseline.exportStamp) > 0)) {
-                    baseline = record;
-                }
-            }
-        }
-        if (baseline == null) {
-            updateCompare(current, cfg);
-            return;
-        }
-        ProbeMetrics baselineMetrics = metricsFromRecord(baseline);
-        String source = "历史基准 " + ProbeRunRecord.formatExportTime(baseline.exportStamp);
-        if (isAccelMode(cfg.modeTag)) {
-            renderAccelCompare(baselineMetrics, baseline.modeTag, current, cfg.modeTag, source);
-        } else {
-            renderAccelCompare(current, cfg.modeTag, baselineMetrics, baseline.modeTag, source);
-        }
-        prevMetrics = current;
-        prevConfig = cfg;
-    }
-
-    /** 加速对比渲染：base 为基线(分母)，accel 为加速(分子)，改善表现为负向百分比。 */
-    private void renderAccelCompare(ProbeMetrics base, String baseTag,
-                                    ProbeMetrics accel, String accelTag, String source) {
-        comparePrevView.setText("基线 · " + compareMetricLine("[" + baseTag + "]", base));
-        compareCurrView.setText("加速 · " + compareMetricLine("[" + accelTag + "]", accel));
-
-        double avgPct = base.avgRttMs > 0 ? (accel.avgRttMs - base.avgRttMs) / base.avgRttMs * 100 : 0;
-        double p95Pct = base.p95RttMs > 0 ? (accel.p95RttMs - base.p95RttMs) / base.p95RttMs * 100 : 0;
-        double p99Pct = base.p99RttMs > 0 ? (accel.p99RttMs - base.p99RttMs) / base.p99RttMs * 100 : 0;
-        double lossPct = base.lossRate > 0
-                ? (accel.lossRate - base.lossRate) / base.lossRate * 100
-                : (accel.lossRate > 0 ? 999 : 0);
-
-        String verdict;
-        int subtle;
-        int border;
-        int minSamples = 50;
-        if (accel.sent < minSamples || base.sent < minSamples) {
-            verdict = "样本不足（建议每组 ≥ " + minSamples + " 包）";
-            subtle = Palette.WARNING_SUBTLE;
-            border = Palette.WARNING_BORDER;
-        } else if (lossPct > 10 || p95Pct > 10 || p99Pct > 10) {
-            verdict = "负向效果";
-            subtle = Palette.DANGER_SUBTLE;
-            border = Palette.DANGER_BORDER;
-        } else if ((lossPct <= -50 || p95Pct <= -10) && p99Pct <= 10) {
-            verdict = "明显改善";
-            subtle = Palette.SUCCESS_SUBTLE;
-            border = Palette.SUCCESS_BORDER;
-        } else if (avgPct < -5 || p95Pct < -5 || lossPct < -5) {
-            verdict = "部分改善";
-            subtle = Palette.SUCCESS_SUBTLE;
-            border = Palette.SUCCESS_BORDER;
-        } else {
-            verdict = "无明显效果";
-            subtle = Palette.SURFACE;
-            border = LINE;
-        }
-
-        compareVerdictView.setText("加速对比 · " + verdict + " · " + source);
-        compareDeltaView.setText(String.format(Locale.US, "%s · %s · %s · %s",
-                formatCompareDelta("Avg", base.avgRttMs, accel.avgRttMs, "ms"),
-                formatCompareDelta("P95", base.p95RttMs, accel.p95RttMs, "ms"),
-                formatCompareDelta("P99", base.p99RttMs, accel.p99RttMs, "ms"),
-                formatLossCompareDelta(base.lossRate, accel.lossRate)));
-        compareView.setBackground(rounded(subtle, border, 12));
-        compareView.setVisibility(View.VISIBLE);
-    }
 
     private ProbeRunner createRunner(ProbeConfig.Protocol protocol, ProbeConfig.Role role) {
         if (protocol == ProbeConfig.Protocol.TCP) {
@@ -4252,11 +3497,11 @@ public final class MainActivity extends Activity {
             mqttTokenHandler.removeCallbacks(mqttTokenPrefetchRunnable);
         }
         mqttTokenPrefetchRunnable = this::prefetchMqttTokenNow;
-        mqttTokenHandler.postDelayed(mqttTokenPrefetchRunnable, MQTT_TOKEN_PREFETCH_DELAY_MS);
+        mqttTokenHandler.postDelayed(mqttTokenPrefetchRunnable, ProbeConstants.Mqtt.TOKEN_PREFETCH_DELAY_MS);
     }
 
     private void prefetchMqttTokenNow() {
-        if (selectedProtocol() != ProbeConfig.Protocol.MQTT || flow.page() != ProbeFlowState.Page.CONFIG) {
+        if (selectedProtocol() != ProbeConfig.Protocol.MQTT || session.flow().page() != ProbeFlowState.Page.CONFIG) {
             return;
         }
         if (!canPrefetchMqttToken()) {
@@ -4505,4 +3750,679 @@ public final class MainActivity extends Activity {
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
     }
+    // =====================================================================
+    // CONFIG 页（ConfigPageSection）
+    // 职责：参数表单 UI、SharedPreferences 读写、校验与 startProbe 发起。
+    // =====================================================================
+    private final class ConfigPageSection {
+        View build() {
+            startButton = primaryCtaButton("开始测试", BLUE);
+            TextView historyLink = headerTextLink("历史记录");
+            historyLink.setOnClickListener(v -> openHistory());
+            TextView helpLink = headerTextLink("说明");
+            helpLink.setOnClickListener(v -> showHelpDialog());
+            View footer = configStartFooter(startButton);
+
+            View connection = configConnectionSection();
+            View probe = configProbeSection();
+            View mode = configModeSection();
+            View weakNet = configWeakNetSection();
+            View mqtt = mqttConfigBlock();
+            updateProtocolUi();
+            refreshModeToggle();
+            refreshPresetToggle();
+            refreshConfigHeaderChips();
+
+            if (TabletLayout.useWideColumns(layoutTier)) {
+                LinearLayout page = new LinearLayout(MainActivity.this);
+                page.setOrientation(LinearLayout.VERTICAL);
+                page.setLayoutParams(new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                page.setBackgroundColor(BG);
+
+                LinearLayout headerWrap = new LinearLayout(MainActivity.this);
+                headerWrap.setOrientation(LinearLayout.VERTICAL);
+                headerWrap.setPadding(
+                        dp(TabletLayout.pagePaddingH(layoutTier)),
+                        dp(TabletLayout.pagePaddingV(layoutTier)),
+                        dp(TabletLayout.pagePaddingH(layoutTier)),
+                        0);
+                headerWrap.addView(header(historyLink, helpLink));
+                page.addView(headerWrap, matchWrap());
+
+                LinearLayout columns = new LinearLayout(MainActivity.this);
+                columns.setOrientation(LinearLayout.HORIZONTAL);
+                columns.setPadding(
+                        dp(TabletLayout.pagePaddingH(layoutTier)),
+                        dp(TabletLayout.headerBottomGapDp(layoutTier)),
+                        dp(TabletLayout.pagePaddingH(layoutTier)),
+                        0);
+                if (TabletLayout.useConfigThreeColumns(layoutTier)) {
+                    columns.addView(configColumnScroll(connection, probe),
+                            new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+                    columns.addView(space(dp(TabletLayout.columnGapDp(layoutTier)), 1));
+                    columns.addView(configColumnScroll(mode, weakNet),
+                            new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+                    columns.addView(space(dp(TabletLayout.columnGapDp(layoutTier)), 1));
+                    columns.addView(configColumnScroll(mqtt),
+                            new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+                } else {
+                    columns.addView(configColumnScroll(connection, probe, mode, weakNet),
+                            new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+                    columns.addView(space(dp(TabletLayout.columnGapDp(layoutTier)), 1));
+                    columns.addView(configColumnScroll(mqtt),
+                            new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+                }
+                page.addView(columns, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+                page.addView(wrapStickyFooter(footer));
+                return page;
+            }
+
+            LinearLayout scrollRoot = new LinearLayout(MainActivity.this);
+            scrollRoot.setOrientation(LinearLayout.VERTICAL);
+            scrollRoot.setPadding(
+                    dp(TabletLayout.pagePaddingH(layoutTier)),
+                    dp(TabletLayout.pagePaddingV(layoutTier)),
+                    dp(TabletLayout.pagePaddingH(layoutTier)),
+                    dp(TabletLayout.configScrollBottomPaddingDp(layoutTier)));
+            scrollRoot.addView(header(historyLink, helpLink));
+            scrollRoot.addView(connection);
+            scrollRoot.addView(probe);
+            scrollRoot.addView(mode);
+            scrollRoot.addView(weakNet);
+            scrollRoot.addView(mqtt);
+            return stickyFooterPage(scrollRoot, footer);
+        }
+
+        void startProbe() {
+            startButton.setEnabled(false);
+            startButton.setAlpha(0.6f);
+            startButton.setText("正在校验…");
+            try {
+                clearFieldErrors();
+                refreshVpnState();
+                boolean vpnActive = VpnState.isVpnActive(MainActivity.this);
+                ProbeConfig.Protocol protocol = selectedProtocol();
+                ProbeConfig.Role role = protocol == ProbeConfig.Protocol.MQTT
+                        ? selectedMqttRole() : ProbeConfig.Role.PROBE;
+                validateProtocolConfig(protocol);
+                lastConfig = new ProbeConfig(
+                        protocol,
+                        selectedHost(),
+                        parsePort(protocol),
+                        parseInt(countInput, "发包数量",
+                                ProbeConstants.Limits.COUNT_MIN_PKT, ProbeConstants.Limits.COUNT_MAX_PKT),
+                        parseInt(ppsInput, "每秒发包数",
+                                ProbeConstants.Limits.PPS_MIN, ProbeConstants.Limits.PPS_MAX),
+                        parseInt(packetBytesInput, "数据包大小",
+                                ProbeConstants.Limits.PACKET_BYTES_MIN_B, ProbeConstants.Limits.PACKET_BYTES_MAX_B),
+                        parseInt(timeoutInput, "超时时间",
+                                ProbeConstants.Limits.TIMEOUT_MS_MIN, ProbeConstants.Limits.TIMEOUT_MS_MAX),
+                        modeSpinner.getSelectedItem().toString(),
+                        UUID.randomUUID().toString().replace("-", "").substring(0, 12),
+                        vpnActive,
+                        mqttClientIdInput.getText().toString().trim(),
+                        mqttPublishTopicInput.getText().toString().trim(),
+                        mqttSubscribeTopicInput.getText().toString().trim(),
+                        mqttUsernameInput.getText().toString().trim(),
+                        currentMqttToken(),
+                        mqttEnvInput.getText().toString().trim(),
+                        mqttDevicePwdInput.getText().toString(),
+                        mqttDeviceMacInput.getText().toString().trim(),
+                        role,
+                        readWeakNetProfile()
+                );
+                saveCurrentConfig();
+                runner = createRunner(protocol, role);
+                lastSamples = new ArrayList<>();
+                lastMetrics = ProbeMetrics.empty();
+                lastPerfStats = null;
+                lastRecvStats = null;
+                lastEchoRecords = null;
+                scopeViewport.reset();
+            refreshChartModeToggle();
+                if (packetRecordView != null) packetRecordView.setText("");
+                lastChartUpdateMs = 0;
+                updateMetrics(lastMetrics, lastSamples);
+                exportView.setText("");
+                if (!session.begin(lastConfig.runId)) {
+                    throw new IllegalStateException("当前已有测试正在运行");
+                }
+                session.prepareForStart();
+                eventLogFollowLatest = true;
+                clearEventLog();
+                boolean responder = role == ProbeConfig.Role.RESPONDER;
+                setMonitorMode(responder);
+                refreshMonitorConfig(lastConfig);
+                if (responder) {
+                    appendEvent("正在以回显端连接 " + lastConfig.host + ":" + lastConfig.port + "…");
+                    if (responderCountView != null) responderCountView.setText("0");
+                    if (responderReceivedView != null) responderReceivedView.setText("0");
+                    if (responderEchoedView != null) responderEchoedView.setText("0");
+                    if (stopButton != null) stopButton.setText("停止回显");
+                } else {
+                    appendEvent("正在连接 " + lastConfig.host + ":" + lastConfig.port + "…");
+                    if (lastConfig.weakNetProfile.isActive()) {
+                        appendEvent("弱网模拟: " + lastConfig.weakNetProfile.displaySummary());
+                    }
+                    if (stopButton != null) stopButton.setText("停止测试");
+                }
+                if (metricsLineView != null) metricsLineView.setText("");
+                setMonitorFinishedControls(false);
+                setButtons(true);
+                renderPage();
+                String runId = lastConfig.runId;
+                runner.start(lastConfig, new ProbeCallback() {
+                    @Override
+                    public void onEvent(String message) {
+                        runOnUiThread(() -> {
+                            if (session.accepts(runId)) appendEvent(message);
+                        });
+                    }
+
+                    @Override
+                    public void onMetrics(ProbeMetrics metrics, List<ProbeSample> samples) {
+                        runOnUiThread(() -> {
+                            if (!session.accepts(runId)) return;
+                            updateMetrics(metrics, samples);
+                            if (!responder) {
+                                updateMetricsLine(metrics);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onPerfStats(ProbePerfStats stats) {
+                        runOnUiThread(() -> {
+                            if (session.accepts(runId)) lastPerfStats = stats;
+                        });
+                    }
+
+                    @Override
+                    public void onRecvStats(ProbeRecvStats stats) {
+                        runOnUiThread(() -> {
+                            if (session.accepts(runId)) lastRecvStats = stats;
+                        });
+                    }
+
+                    @Override
+                    public void onEchoRecords(List<EchoRecord> records) {
+                        runOnUiThread(() -> {
+                            if (session.accepts(runId)) lastEchoRecords = records;
+                        });
+                    }
+
+                    @Override
+                    public void onFinished(ProbeMetrics metrics, List<ProbeSample> samples) {
+                        runOnUiThread(() -> runningPage.handleRunnerFinished(runId, metrics, samples));
+                    }
+
+                    @Override
+                    public void onFailed(Throwable error, ProbeMetrics metrics, List<ProbeSample> samples) {
+                        runOnUiThread(() -> runningPage.handleRunnerFailed(runId, error, metrics, samples));
+                    }
+                });
+            } catch (Exception exc) {
+                String message = exc.getMessage() == null ? "无法开始测试，请检查参数" : exc.getMessage();
+                if (session.flow().page() == ProbeFlowState.Page.RUNNING) {
+                    runningPage.finishRun(session.flow().activeRunId(), ProbeFlowState.Outcome.FAILED, message,
+                            lastMetrics, new ArrayList<>(lastSamples));
+                } else {
+                    startButton.setEnabled(true);
+                    startButton.setAlpha(1f);
+                    startButton.setText("开始测试");
+                    Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                }
+            }
+        }
+    }
+
+    // =====================================================================
+    // RUNNING 页（RunningPageSection）
+    // 职责：运行监测 UI、Runner 回调编排、停止/取消/待确认完成。
+    // =====================================================================
+    private final class RunningPageSection {
+        View build() {
+            stopButton = primaryCtaButton("停止测试", RED);
+            viewResultButton = primaryCtaButton("查看测试结果", BLUE);
+            viewResultButton.setVisibility(View.GONE);
+            viewResultButton.setOnClickListener(v -> runningPage.confirmShowResult());
+
+            LinearLayout btnRow = new LinearLayout(MainActivity.this);
+            btnRow.setOrientation(LinearLayout.HORIZONTAL);
+            int monitorBtnH = primaryButtonHeight();
+            btnRow.addView(stopButton, new LinearLayout.LayoutParams(0, monitorBtnH, 1f));
+            monitorBtnSpacer = space(dp(12), 1);
+            btnRow.addView(monitorBtnSpacer);
+            btnRow.addView(viewResultButton, new LinearLayout.LayoutParams(0, monitorBtnH, 1f));
+
+            responderCard = responderCard();
+            monitorRttCard = rttChartSectionCard("RTT 趋势", chartHeader(), chartView());
+            monitorPacketRecordsCard = packetRecordsCard();
+            monitorEventLogCard = eventLogCard();
+
+            LinearLayout scrollRoot = new LinearLayout(MainActivity.this);
+            scrollRoot.setOrientation(LinearLayout.VERTICAL);
+            int pagePadH = dp(TabletLayout.pagePaddingH(layoutTier));
+            int stepInset = Math.max(0,
+                    dp(TabletLayout.stepBadgeContentInsetDp(layoutTier)) - pagePadH);
+            scrollRoot.setPadding(
+                    pagePadH + stepInset,
+                    dp(TabletLayout.pagePaddingV(layoutTier)),
+                    pagePadH,
+                    dp(TabletLayout.pagePaddingBottom(layoutTier)));
+
+            monitorTitleView = text("运行监测", TabletLayout.pageTitleSp(layoutTier), INK, Typeface.BOLD);
+            scrollRoot.addView(monitorTitleView);
+            monitorSubtitleView = smallText("实时查看链路质量与逐包状态", MUTED, Typeface.NORMAL);
+            monitorSubtitleView.setPadding(0, dp(4), 0, dp(TabletLayout.pageSubtitleBottomDp(layoutTier)));
+            scrollRoot.addView(monitorSubtitleView);
+
+            monitorConfigCardView = monitorConfigCard();
+            scrollRoot.addView(monitorConfigCardView);
+
+            monitorStatusPill = statusPill();
+            monitorMetricCards = metricCards();
+            monitorOverviewCard = overviewCard();
+
+            monitorProbePanel = buildMonitorProbePanel();
+            monitorResponderPanel = buildMonitorResponderPanel();
+            applyMonitorSectionGap(monitorProbePanel);
+            scrollRoot.addView(monitorProbePanel);
+            applyMonitorSectionGap(monitorResponderPanel);
+            scrollRoot.addView(monitorResponderPanel);
+            applyMonitorSectionGap(monitorEventLogCard);
+            scrollRoot.addView(monitorEventLogCard);
+
+            return stickyFooterPage(scrollRoot, btnRow);
+        }
+
+            void handleRunnerFinished(String runId, ProbeMetrics metrics, List<ProbeSample> samples) {
+            boolean responder = lastConfig != null
+                    && lastConfig.mqttRole == ProbeConfig.Role.RESPONDER;
+            switch (session.onRunnerFinished(runId, responder)) {
+                case IGNORE:
+                    return;
+                case CANCEL_RUN:
+                    cancelRun(runId);
+                    return;
+                case FINISH_STOPPED:
+                    finishRun(runId, ProbeFlowState.Outcome.STOPPED, "测试由用户停止", metrics, samples);
+                    return;
+                case FINISH_RESPONDER_STOPPED:
+                    finishRun(runId, ProbeFlowState.Outcome.STOPPED, "回显由用户停止", metrics, samples);
+                    return;
+                case FINISH_RESPONDER_COMPLETED:
+                    finishRun(runId, ProbeFlowState.Outcome.COMPLETED, null, metrics, samples);
+                    return;
+                case COMPLETE_PENDING_CONFIRM:
+                    completeRunPendingConfirm(runId, metrics, samples);
+                    return;
+                default:
+                    return;
+            }
+        }
+
+            void handleRunnerFailed(String runId, Throwable error,
+                                      ProbeMetrics metrics, List<ProbeSample> samples) {
+            switch (session.onRunnerFailed(runId)) {
+                case IGNORE:
+                    return;
+                case CANCEL_RUN:
+                    cancelRun(runId);
+                    return;
+                case FINISH_FAILED:
+                    finishRun(runId, ProbeFlowState.Outcome.FAILED,
+                            ProbeErrorMessage.from(error), metrics, samples);
+                    return;
+                default:
+                    return;
+            }
+        }
+
+            void confirmStopAndShowResult() {
+            if (session.flow().page() != ProbeFlowState.Page.RUNNING
+                    || session.isStopRequested() || session.isCancelRequested()) return;
+            new AlertDialog.Builder(MainActivity.this)
+                    .setTitle("停止当前测试？")
+                    .setMessage("可停止并查看已采集结果，或取消本次测试（不保存记录，返回参数设置）。")
+                    .setNegativeButton("继续测试", null)
+                    .setNeutralButton("取消测试", (dialog, which) -> runningPage.requestCancel())
+                    .setPositiveButton("停止并查看结果", (dialog, which) -> runningPage.requestStop())
+                    .show();
+        }
+
+            void requestStop() {
+            if (session.isStopRequested() || session.isCancelRequested()
+                    || session.flow().page() != ProbeFlowState.Page.RUNNING) return;
+            session.requestStop();
+            setRunningUi(false, "正在停止…");
+            if (runner != null) runner.stop();
+        }
+
+            void requestCancel() {
+            if (session.isCancelRequested() || session.isStopRequested()
+                    || session.flow().page() != ProbeFlowState.Page.RUNNING) return;
+            session.requestCancel();
+            setRunningUi(false, "正在取消…");
+            if (runner != null) runner.stop();
+        }
+
+            void cancelRun(String runId) {
+            if (!session.accepts(runId)) return;
+            runner = null;
+            resetForRetest();
+            Toast.makeText(MainActivity.this, "已取消，未保存测试记录", Toast.LENGTH_SHORT).show();
+        }
+
+            void finishRun(String runId, ProbeFlowState.Outcome outcome, String message,
+                               ProbeMetrics metrics, List<ProbeSample> samples) {
+            if (!session.flow().finish(runId, outcome, message)) return;
+            if (outcome == ProbeFlowState.Outcome.STOPPED) {
+                lastChartUpdateMs = 0;
+            }
+            updateMetrics(metrics == null ? ProbeMetrics.empty() : metrics,
+                    samples == null ? new ArrayList<>() : samples);
+            resultPage.applyResultPage(outcome, message);
+            setMonitorFinishedControls(false);
+            runner = null;
+            renderPage();
+        }
+
+            void completeRunPendingConfirm(String runId, ProbeMetrics metrics, List<ProbeSample> samples) {
+            if (!session.flow().completePending(runId, ProbeFlowState.Outcome.COMPLETED, null)) return;
+            lastChartUpdateMs = 0; // 绕过节流，确保完成时图表展示完整数据
+            updateMetrics(metrics == null ? ProbeMetrics.empty() : metrics,
+                    samples == null ? new ArrayList<>() : samples);
+            updateMetricsLine(lastMetrics);
+            runner = null;
+            setMonitorFinishedControls(true);
+            appendEvent("测试已完成，点击下方「查看测试结果」查看详情。");
+        }
+
+            void confirmShowResult() {
+            if (!session.flow().confirmResult()) return;
+            resultPage.applyResultPage(session.flow().outcome(), session.flow().message());
+            setMonitorFinishedControls(false);
+            renderPage();
+        }
+
+        }
+
+        // =====================================================================
+    // RESULT 页（ResultPageSection）
+    // 职责：结果展示 UI、自动/手动导出、加速对比渲染。
+    // =====================================================================
+    private final class ResultPageSection {
+        View build() {
+            exportButton = button("再次导出", Palette.NEUTRAL_DARK, Color.WHITE);
+            exportButton.setOnClickListener(v -> exportLastRun(true));
+            retestButton = button("再次测试", Palette.SURFACE_SUBTLE, INK);
+            retestButton.setOnClickListener(v -> resetForRetest());
+            View footer = resultActionFooter(exportButton, retestButton);
+
+            LinearLayout scrollRoot = new LinearLayout(MainActivity.this);
+            scrollRoot.setOrientation(LinearLayout.VERTICAL);
+            scrollRoot.setPadding(
+                    dp(TabletLayout.pagePaddingH(layoutTier)),
+                    dp(TabletLayout.pagePaddingV(layoutTier)),
+                    dp(TabletLayout.pagePaddingH(layoutTier)),
+                    dp(TabletLayout.pagePaddingBottom(layoutTier)));
+
+            TextView title = text("测试结果", TabletLayout.pageTitleLargeSp(layoutTier), BLUE, Typeface.BOLD);
+            title.setPadding(dp(2), 0, dp(2), dp(TabletLayout.headerBottomGapDp(layoutTier)));
+            scrollRoot.addView(title);
+
+            resultStatusView = text("暂无测试结果", 15, MUTED, Typeface.BOLD);
+            resultStatusView.setPadding(dp(16), dp(14), dp(16), dp(14));
+            resultStatusView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+            scrollRoot.addView(resultStatusView, matchWrap());
+
+            resultConfigCard = buildConfigSummaryCard("本次配置", resultConfigViews);
+            scrollRoot.addView(resultConfigCard);
+
+            LinearLayout metricsWrap = new LinearLayout(MainActivity.this);
+            metricsWrap.setOrientation(LinearLayout.VERTICAL);
+            metricsWrap.setLayoutParams(matchWrap());
+            metricsWrap.addView(resultPrimaryMetricGrid());
+            metricsWrap.addView(resultSecondaryMetricGrid());
+            resultProbeMetricsPanel = metricsWrap;
+            scrollRoot.addView(resultProbeMetricsPanel);
+
+            resultResponderPanel = buildResponderResultPanel();
+            resultResponderPanel.setVisibility(View.GONE);
+            scrollRoot.addView(resultResponderPanel);
+
+            resultSummaryView = new TextView(MainActivity.this);
+            resultSummaryView.setTextSize(13);
+            resultSummaryView.setTextColor(INK);
+            resultSummaryView.setPadding(dp(14), dp(14), dp(14), dp(14));
+            resultSummaryView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+            resultSummaryView.setText("暂无测试结果，请先运行一次测试");
+            resultSummaryView.setVisibility(View.GONE);
+            scrollRoot.addView(resultSummaryView, matchWrap());
+
+            compareView = new LinearLayout(MainActivity.this);
+            compareView.setOrientation(LinearLayout.VERTICAL);
+            compareView.setPadding(dp(14), dp(12), dp(14), dp(12));
+            compareView.setBackground(rounded(Palette.SURFACE, LINE, 12));
+            compareVerdictView = text("加速对比", 13, MUTED, Typeface.BOLD);
+            compareView.addView(compareVerdictView);
+            comparePrevView = smallText("", MUTED, Typeface.NORMAL);
+            comparePrevView.setPadding(0, dp(8), 0, 0);
+            compareView.addView(comparePrevView);
+            compareCurrView = text("", 13, INK, Typeface.BOLD);
+            compareCurrView.setPadding(0, dp(4), 0, 0);
+            compareView.addView(compareCurrView);
+            compareDeltaView = smallText("", BLUE, Typeface.NORMAL);
+            compareDeltaView.setPadding(0, dp(8), 0, 0);
+            compareView.addView(compareDeltaView);
+            LinearLayout.LayoutParams cmp = matchWrap();
+            cmp.topMargin = dp(12);
+            compareView.setLayoutParams(cmp);
+            compareView.setVisibility(View.GONE);
+            scrollRoot.addView(compareView);
+
+            exportView = smallText("", MUTED, Typeface.NORMAL);
+            exportView.setPadding(dp(14), dp(14), dp(14), dp(14));
+            exportView.setBackground(rounded(Palette.SURFACE_SUBTLE, LINE, 12));
+            LinearLayout.LayoutParams expParams = matchWrap();
+            expParams.topMargin = dp(12);
+            exportView.setLayoutParams(expParams);
+            scrollRoot.addView(exportView);
+
+            return stickyFooterPage(scrollRoot, footer);
+        }
+
+            void applyResultPage(ProbeFlowState.Outcome outcome, String message) {
+            setButtons(false);
+            populateResultPage(outcome, message, lastMetrics);
+            boolean responder = lastConfig != null && lastConfig.mqttRole == ProbeConfig.Role.RESPONDER;
+            // 探测端且有有效样本：自动配对本地历史中对立 modeTag 的 run。
+            if (!responder && outcome != ProbeFlowState.Outcome.FAILED && lastMetrics.sent > 0) {
+                autoCompareWithHistory(lastMetrics, lastConfig);
+            } else if (compareView != null) {
+                compareView.setVisibility(View.GONE);
+            }
+            if (!responder) {
+                exportLastRun(false);
+                if (exportView != null) exportView.setVisibility(View.VISIBLE);
+            } else {
+                exportEchoRun();
+            }
+        }
+
+            void exportEchoRun() {
+            if (exportView == null) {
+                return;
+            }
+            if (lastConfig == null || lastEchoRecords == null || lastEchoRecords.isEmpty()) {
+                exportView.setVisibility(View.GONE);
+                return;
+            }
+            if (!ensureStoragePermission(PENDING_EXPORT_ECHO)) {
+                exportView.setVisibility(View.VISIBLE);
+                exportView.setText("请授予存储权限以导出回显记录到 Download 目录");
+                return;
+            }
+            try {
+                File file = ProbeStorage.writeEchoRun(MainActivity.this, lastConfig, new ArrayList<>(lastEchoRecords));
+                exportView.setVisibility(View.VISIBLE);
+                exportView.setText("回显记录已导出至 " + ProbeStorage.downloadsDisplayPath() + "/"
+                        + file.getParentFile().getName() + "/\n" + file.getName()
+                        + "（" + lastEchoRecords.size() + " 条去程到达，供方向级丢包对齐）");
+            } catch (Exception exc) {
+                exportView.setVisibility(View.VISIBLE);
+                exportView.setText("回显记录导出失败: " + exc.getMessage());
+            }
+        }
+
+            void exportLastRun(boolean userInitiated) {
+            if (lastConfig == null || lastSamples.isEmpty()) {
+                exportView.setText("暂无可导出的采样数据");
+                exportButton.setEnabled(false);
+                exportButton.setAlpha(0.45f);
+                if (userInitiated) Toast.makeText(MainActivity.this, "暂无可导出的采样数据", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (!ensureStoragePermission(PENDING_EXPORT_PROBE)) {
+                if (userInitiated) {
+                    Toast.makeText(MainActivity.this, "请授予存储权限以导出到 Download 目录", Toast.LENGTH_SHORT).show();
+                }
+                return;
+            }
+            try {
+                File[] files = ProbeStorage.writeRun(MainActivity.this, lastConfig, lastMetrics, new ArrayList<>(lastSamples),
+                        lastPerfStats, lastRecvStats);
+                exportView.setText("已导出至 " + ProbeStorage.downloadsDisplayPath() + "/"
+                        + files[0].getParentFile().getName() + "/\n"
+                        + "CSV: " + files[0].getName() + "\n"
+                        + "Summary: " + files[1].getName());
+                exportButton.setText("再次导出");
+                exportButton.setEnabled(true);
+                exportButton.setAlpha(1f);
+            } catch (Exception exc) {
+                String message = "导出失败: " + exc.getMessage();
+                exportView.setText(message);
+                exportButton.setText("重试导出");
+                exportButton.setEnabled(true);
+                exportButton.setAlpha(1f);
+                if (userInitiated) Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        }
+
+        void updateCompare(ProbeMetrics current, ProbeConfig cfg) {
+            if (compareView == null || compareVerdictView == null || current == null || cfg == null) return;
+            if (current.sent == 0) return;
+
+            if (prevMetrics == null) {
+                prevMetrics = current;
+                prevConfig = cfg;
+                compareVerdictView.setText("加速对比");
+                comparePrevView.setText("基准已记录 · "
+                        + ProbeAccelCompare.compareMetricLine("[" + cfg.modeTag + "]", current));
+                compareCurrView.setText("切换模式后再测，即可查看对比");
+                compareDeltaView.setText("");
+                compareView.setBackground(rounded(Palette.SURFACE, LINE, 12));
+                compareView.setVisibility(View.VISIBLE);
+                return;
+            }
+
+            String prevTag = prevConfig != null ? prevConfig.modeTag : "上次";
+            String currTag = cfg.modeTag;
+            comparePrevView.setText("上次 · "
+                    + ProbeAccelCompare.compareMetricLine("[" + prevTag + "]", prevMetrics));
+            compareCurrView.setText("本次 · "
+                    + ProbeAccelCompare.compareMetricLine("[" + currTag + "]", current));
+
+            ProbeAccelCompare.Verdict verdict = ProbeAccelCompare.computeVerdict(prevMetrics, current);
+            compareVerdictView.setText("加速对比 · " + verdict.label);
+            compareDeltaView.setText(String.format(Locale.US, "%s · %s · %s · %s",
+                    ProbeAccelCompare.formatCompareDelta("Avg", prevMetrics.avgRttMs, current.avgRttMs, "ms"),
+                    ProbeAccelCompare.formatCompareDelta("P95", prevMetrics.p95RttMs, current.p95RttMs, "ms"),
+                    ProbeAccelCompare.formatCompareDelta("P99", prevMetrics.p99RttMs, current.p99RttMs, "ms"),
+                    ProbeAccelCompare.formatLossCompareDelta(prevMetrics.lossRate, current.lossRate)));
+            compareView.setBackground(rounded(verdict.subtleColor, verdict.borderColor, 12));
+            compareView.setVisibility(View.VISIBLE);
+            prevMetrics = current;
+            prevConfig = cfg;
+        }
+
+        /** 按协议/发包数/host/弱网/对立 modeTag 配对本地历史；无匹配则退回会话内上次 vs 本次。 */
+        void autoCompareWithHistory(ProbeMetrics current, ProbeConfig cfg) {
+            if (compareView == null || compareVerdictView == null || cfg == null
+                    || current == null || current.sent == 0) {
+                return;
+            }
+            String opposite = ProbeAccelCompare.oppositeMode(cfg.modeTag);
+            ProbeRunRecord baseline = null;
+            if (opposite != null) {
+                List<ProbeRunRecord> runs;
+                try {
+                    runs = ProbeStorage.listRuns(MainActivity.this);
+                } catch (Exception exc) {
+                    runs = new ArrayList<>();
+                }
+                for (ProbeRunRecord record : runs) {
+                    if (record == null || record.protocol == null) {
+                        continue;
+                    }
+                    if (!record.protocol.equals(cfg.protocol.label)) {
+                        continue;
+                    }
+                    if (record.count != cfg.count) {
+                        continue;
+                    }
+                    if (!opposite.equals(record.modeTag)) {
+                        continue;
+                    }
+                    if (!ProbeAccelCompare.matchesHistoryHost(record, cfg)) {
+                        continue;
+                    }
+                    if (!ProbeAccelCompare.matchesHistoryWeakNet(record, cfg)) {
+                        continue;
+                    }
+                    if (baseline == null || (record.exportStamp != null
+                            && record.exportStamp.compareTo(baseline.exportStamp) > 0)) {
+                        baseline = record;
+                    }
+                }
+            }
+            if (baseline == null) {
+                updateCompare(current, cfg);
+                return;
+            }
+            ProbeMetrics baselineMetrics = ProbeAccelCompare.metricsFromRecord(baseline);
+            String source = "历史基准 " + ProbeRunRecord.formatExportTime(baseline.exportStamp);
+            if (ProbeAccelCompare.isAccelMode(cfg.modeTag)) {
+                renderAccelCompare(baselineMetrics, baseline.modeTag, current, cfg.modeTag, source);
+            } else {
+                renderAccelCompare(current, cfg.modeTag, baselineMetrics, baseline.modeTag, source);
+            }
+            prevMetrics = current;
+            prevConfig = cfg;
+        }
+
+        /** base 为基线(分母)，accel 为加速(分子)，改善表现为负向百分比。 */
+        void renderAccelCompare(ProbeMetrics base, String baseTag,
+                                ProbeMetrics accel, String accelTag, String source) {
+            comparePrevView.setText("基线 · "
+                    + ProbeAccelCompare.compareMetricLine("[" + baseTag + "]", base));
+            compareCurrView.setText("加速 · "
+                    + ProbeAccelCompare.compareMetricLine("[" + accelTag + "]", accel));
+
+            ProbeAccelCompare.Verdict verdict = ProbeAccelCompare.computeVerdict(base, accel);
+            compareVerdictView.setText("加速对比 · " + verdict.label + " · " + source);
+            compareDeltaView.setText(String.format(Locale.US, "%s · %s · %s · %s",
+                    ProbeAccelCompare.formatCompareDelta("Avg", base.avgRttMs, accel.avgRttMs, "ms"),
+                    ProbeAccelCompare.formatCompareDelta("P95", base.p95RttMs, accel.p95RttMs, "ms"),
+                    ProbeAccelCompare.formatCompareDelta("P99", base.p99RttMs, accel.p99RttMs, "ms"),
+                    ProbeAccelCompare.formatLossCompareDelta(base.lossRate, accel.lossRate)));
+            compareView.setBackground(rounded(verdict.subtleColor, verdict.borderColor, 12));
+            compareView.setVisibility(View.VISIBLE);
+        }
+
+    }
+
 }
