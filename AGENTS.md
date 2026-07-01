@@ -16,7 +16,7 @@
 ## Learned Workspace Facts
 
 - MNATool 为云聚通网络探测工具 monorepo，主要含 `android-probe-app/`、`docs/`、`tools/`；构建 JDK 17、AGP 9.0.1、Gradle 9.3.0，Gradle 分发 `D:\jobs\gradle`，可用 `tools/build_android_probe.ps1` 编译安装。
-- Android 探针包名 `com.mnatool.yunjutongprobe`，源码在 `android-probe-app/app/src/main/java/com/mnatool/yunjutongprobe/`；`MainActivity` ~4100 行（UI+编排）是理解成本主因，As-Is Spec（`docs/android-probe-as-is.md`）为流程/边界/异常/特殊逻辑与已知问题（B1–B14）的单一事实来源。
+- Android 探针包名 `com.mnatool.yunjutongprobe`，源码在 `android-probe-app/app/src/main/java/com/mnatool/yunjutongprobe/`；`MainActivity` 为薄壳（~40 行），三页 UI 与编排由 `ProbeUiCoordinator` + 分页 Controller（`ConfigPage`/`RunningPage`/`ResultPage`/`HistoryPage`）承担；As-Is Spec（`docs/android-probe-as-is.md`）为流程/边界/异常/特殊逻辑与已知问题（B1–B14）的单一事实来源。
 - 探测参数双档预设：`FIELD` 现场千级（1000/10pps/200B/5000ms）、`LAB` 实验室十万级（100000/2000pps/100B/60000ms），定义于 `ProbeDefaults.java`（VERSION=4；旧版 LAB 500/2000pps+1000B 自动迁移为 2000pps/100B）。
 - MQTT 主测：执行手册以双平板验证飞书《测试记录 v2.0》为主线，场景 R1（中转矩阵）/ R2（弱网矩阵，含 R2-dual-drop10/20/30 等 drop 分档），档位 **实验室十万级 @ 2000pps**；Wiki 链接单一来源 `tools/feishu_doc_config.py`（结论 `FEISHU_CONCLUSION_DOC`、记录模板 `FEISHU_TEST_RECORD_V2`）；主结论归档 [飞书 Wiki O7YP…](https://q00enigbkuh.feishu.cn/wiki/O7YPwqYNoi2icrk3X7ccLSJCnae)，由 `gen_feishu_blocks.py` + `push_feishu_doc.py` 从 `test-runs/` 同步（场景中文 `SCENE_DISPLAY`；主表 **p50/p99/p50**，不含 jitterMs；A→B 对比列改善绿/变差红）；见 `docs/云聚通Probe网络测试执行手册.md`。
 - 典型测试环境：MaxiSys Ultra S2 西安双机（`50f08d16` 探测 / `a4fbf4e7` 回显）；App 默认西安 Broker，主结论对齐业务路径用广州/广州测试。

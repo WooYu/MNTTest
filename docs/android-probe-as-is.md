@@ -24,12 +24,32 @@
 
 ## 2. 架构与模块职责
 
-**配置常量**：可调阈值、超时、端口上下界等集中于 `ProbeConstants.java`（后缀 `_MS`/`_NS`/`_PPS`/`_PKT`/`_B`/`_PCT` 标明单位）；档位预设仍见 `ProbeDefaults`，MQTT 环境默认见 `MqttDefaultProfile`。
+**配置常量**：可调阈值、超时、端口上下界等集中于 `util/ProbeConstants.java`（后缀 `_MS`/`_NS`/`_PPS`/`_PKT`/`_B`/`_PCT` 标明单位）；档位预设见 `util/ProbeDefaults`，MQTT 环境默认见 `runner/mqtt/MqttDefaultProfile`。
+
+**源码包结构**（`com.mnatool.yunjutongprobe`，`applicationId` 不变）：
+
+| 子包 | 典型类 |
+|------|--------|
+| （根） | `MainActivity` |
+| `ui` | `ProbeUiCoordinator`、`ProbeRunContext` |
+| `ui.config` / `ui.running` / `ui.result` / `ui.history` | 各页 Controller + Views |
+| `ui.common` / `ui.chart` | `ProbeViewFactory`、`TabletLayout`、`MetricsChartView` |
+| `session` | `ProbeFlowState`、`ProbeSessionCoordinator` |
+| `runner` / `runner.mqtt` | `*ProbeRunner`、`MqttTokenProvider` |
+| `model` / `metrics` / `codec` / `storage` / `util` | 配置 DTO、指标、payload、导出、常量 |
+
+MQTT 探测/回显为运行时角色（`ProbeConfig.Role`），不按子包拆分。
 
 ```mermaid
 flowchart TB
-    MA["MainActivity<br/>~4100 行 UI+编排"]
+    MA["MainActivity<br/>~40 行生命周期壳"]
+    UIC["ProbeUiCoordinator<br/>三页编排 + Runner"]
+  CP["ConfigPageController"]
+  RP["RunningPageController"]
+  ResP["ResultPageController"]
+  HP["HistoryPageController"]
     FS["ProbeFlowState<br/>三页状态机"]
+    SC["ProbeSessionCoordinator"]
     PR["ProbeRunner"]
     UDP["UdpProbeRunner"]
     TCP["TcpProbeRunner"]
@@ -39,19 +59,27 @@ flowchart TB
     PC["ProbePayloadCodec"]
     PS["ProbeStorage"]
 
-    MA --> FS
-    MA --> PR
+    MA --> UIC
+    UIC --> CP & RP & ResP & HP
+    UIC --> SC
+    SC --> FS
+    UIC --> PR
     PR --> UDP & TCP & MQTTP & MQTTR
     MQTTP & UDP & TCP --> MC
     MQTTR --> PC
     MQTTP & UDP & TCP --> PC
-    MA --> PS
-    MC --> MA
+    ResP --> PS
 ```
 
 | 模块 | 职责 |
 |------|------|
-| `MainActivity` | 参数 UI、流程编排、回调聚合、图表刷新、导出、加速对比 |
+| `MainActivity` | Activity 生命周期壳（`onCreate` / `onDestroy` / 权限 / 返回键） |
+| `ProbeUiCoordinator` | 页面容器、Controller 接线、MQTT Token 预取、跨页状态 `ProbeRunContext` |
+| `ConfigPageController` + `ProbeConfigStore` | 参数页 UI、SharedPreferences、校验与 `startProbe` |
+| `RunningPageController` | 运行监测 UI、指标/图表刷新、停止/取消/待确认完成 |
+| `ResultPageController` | 结果展示、导出、加速对比 UI |
+| `HistoryPageController` | 历史列表/详情 overlay |
+| `ProbeViewFactory` | 纯 Java View 工厂（dp/panel/button/text 等） |
 | `ProbeFlowState` | CONFIG / RUNNING / RESULT + awaitingConfirm |
 | `*ProbeRunner` | 协议探测/回显；统一 `start` / `stop` |
 | `MetricsCalculator` | 运行中 vs 最终结算两套丢包口径 |
@@ -395,9 +423,9 @@ Compact 格式：`{sendMs},{seq},AAA…`（Autel 联调兼容）；回显端原�
 
 | ID | 问题 | 位置 | 影响 |
 |----|------|------|------|
-| **B7** | `MainActivity` ~4100 行，UI/业务/导出/对比耦合 | 全局 | 逻辑难理清，改动易回归 |
-| **B8** | `updateCompare` 与 `renderAccelCompare` 判决逻辑完全重复 | `MainActivity` L3896-4114 | 阈值变更需双处同步 |
-| **B9** | `onDestroy` 停 Runner 但不注销回调 | `MainActivity` L249-253 | 销毁后 UI 回调潜在 NPE |
+| **B7** | ~~`MainActivity` ~4100 行，UI/业务/导出/对比耦合~~ | 全局 | **已修复**（Plan B：`ProbeUiCoordinator` + 分页 Controller） |
+| **B8** | ~~`updateCompare` 与 `renderAccelCompare` 判决逻辑完全重复~~ | `ResultPageController` | **已修复**（逻辑集中于 `ProbeAccelCompare`） |
+| **B9** | ~~`onDestroy` 停 Runner 但不注销回调~~ | `ProbeUiCoordinator` | **已修复**（`runner = null` + 取消 MQTT Token Handler） |
 | **B10** | `requestStop` 中 `runId` 赋值未使用 | `MainActivity` L3152 | 死代码，误导阅读 |
 | **B11** | VPN 仅检测 TRANSPORT_VPN 存在，不验证 Probe 流量是否走 VPN | `VpnState` | 设计文档要求的「冒烟覆盖校验」未完整实现 |
 | **B12** | `ProbeCsvReader` 未还原 `serverRecvNs/serverSendNs` | 读历史 CSV | 历史详情无法重现分段时延 |
@@ -435,7 +463,7 @@ Compact 格式：`{sendMs},{seq},AAA…`（Autel 联调兼容）；回显端原�
 ## 13. 后续 Spec-Kit Plan 建议
 
 1. **Plan A（优先）**：修复 P0/P1 问题（B1–B6），每项带 failing test  
-2. **Plan B**：拆 `MainActivity` — 抽出 `ProbeUiCoordinator` / 三页 Builder，不改 Runner  
+2. ~~**Plan B**：拆 `MainActivity` — 抽出 `ProbeUiCoordinator` / 三页 Builder，不改 Runner~~ **已完成**  
 3. **Plan C**：补齐 index 字段（p50、weakNetSummary），统一对比口径  
 4. **Plan D**：VPN 冒烟校验（对齐设计文档 §5.1）
 
