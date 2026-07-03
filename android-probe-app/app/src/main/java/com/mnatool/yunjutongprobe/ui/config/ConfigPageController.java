@@ -324,6 +324,7 @@ public class ConfigPageController {
         views.hostSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
     public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+    applyRelayHostPortUi(MqttRelayServerCatalog.hostAt(position));
     refreshHostSubtitle();
             }
 
@@ -1031,6 +1032,23 @@ public class ConfigPageController {
     refreshConfigHeaderChips();
     }
 
+    private void applyRelayHostPortUi(String host) {
+        if (views.portInput == null) {
+            return;
+        }
+        if (MqttRelayServerCatalog.hostOmitsPort(host)) {
+            views.portInput.setText("");
+            views.portInput.setEnabled(false);
+            views.portInput.setFocusable(false);
+            views.portInput.setHint("无需填写");
+        } else {
+            views.portInput.setEnabled(true);
+            views.portInput.setFocusable(true);
+            views.portInput.setFocusableInTouchMode(true);
+            views.portInput.setHint("默认 " + MqttRelayServerCatalog.PORT);
+        }
+    }
+
 
     public void refreshModeToggle() {
         boolean weakScene = views.weakNetSceneSwitch != null && views.weakNetSceneSwitch.isChecked();
@@ -1089,7 +1107,10 @@ public class ConfigPageController {
             }
         }
         if (protocol == ProbeConfig.Protocol.MQTT) {
-            views.portInput.setHint("默认 " + MqttRelayServerCatalog.PORT);
+            applyRelayHostPortUi(store.selectedHost(views));
+            if (views.portInput.isEnabled()) {
+                views.portInput.setHint("默认 " + MqttRelayServerCatalog.PORT);
+            }
         } else if (protocol == ProbeConfig.Protocol.TCP) {
             views.portInput.setHint("默认 9002");
         } else {

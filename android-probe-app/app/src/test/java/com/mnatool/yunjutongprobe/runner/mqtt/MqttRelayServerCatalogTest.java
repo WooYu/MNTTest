@@ -20,10 +20,20 @@ public class MqttRelayServerCatalogTest {
     @Test
     public void catalogContainsMergedScreenshotEntries() {
         assertTrue(MqttRelayServerCatalog.indexOfHost("113.133.169.192") >= 0);
+        assertTrue(MqttRelayServerCatalog.indexOfHost("183.56.204.114") >= 0);
         assertTrue(MqttRelayServerCatalog.indexOfHost("8.138.127.94") >= 0);
         assertTrue(MqttRelayServerCatalog.indexOfHost("175.6.33.199") >= 0);
         assertTrue(MqttRelayServerCatalog.indexOfHost("guangzhoumqtt.autel.com") >= 0);
         assertTrue(MqttRelayServerCatalog.indexOfHost("54.254.252.122") >= 0);
+    }
+
+    @Test
+    public void guangzhouDomainOmitsPortInDisplay() {
+        assertTrue(MqttRelayServerCatalog.hostOmitsPort("guangzhoumqtt.autel.com"));
+        assertEquals("广州域名 · guangzhoumqtt.autel.com",
+                MqttRelayServerCatalog.formatEndpoint("guangzhoumqtt.autel.com", 1883));
+        assertEquals("广州 · 183.56.204.114:1883",
+                MqttRelayServerCatalog.formatEndpoint("183.56.204.114", 1883));
     }
 
     @Test

@@ -8,6 +8,7 @@ import android.widget.TextView;
 
 import java.util.Locale;
 import com.mnatool.yunjutongprobe.model.ProbeConfig;
+import com.mnatool.yunjutongprobe.runner.mqtt.MqttRelayServerCatalog;
 import com.mnatool.yunjutongprobe.util.ProbeDefaults;
 
 
@@ -92,12 +93,12 @@ public class ConfigSummaryUi {
         boolean responder = config.mqttRole == ProbeConfig.Role.RESPONDER;
         StringBuilder sb = new StringBuilder();
         if (responder) {
-    appendLine(sb, "Broker", config.host + ":" + config.port);
+    appendLine(sb, "Broker", MqttRelayServerCatalog.formatEndpoint(config.host, config.port));
     appendLine(sb, "本机 SN", config.mqttClientId);
     appendLine(sb, "订阅", config.mqttSubscribeTopic);
     appendLine(sb, "转发", config.mqttPublishTopic);
         } else {
-    appendLine(sb, "目标", config.host + ":" + config.port);
+    appendLine(sb, "目标", MqttRelayServerCatalog.formatEndpoint(config.host, config.port));
     appendLine(sb, "采样", String.format(Locale.US,
                     "%d 包 · %d pps · %d B · 超时 %d ms",
                     config.count, config.pps, config.packetBytes, config.timeoutMs));

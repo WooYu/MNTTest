@@ -13,7 +13,8 @@ public class MqttRelayServerCatalog {
     new Entry("西安", "113.133.169.192"),
     new Entry("北京", "47.94.169.65"),
     new Entry("成都", "118.121.199.12"),
-    new Entry("广州", "guangzhoumqtt.autel.com"),
+    new Entry("广州", "183.56.204.114"),
+    new Entry("广州域名", "guangzhoumqtt.autel.com", true),
     new Entry("广州测试", "8.138.127.94"),
     new Entry("杭州", "hangzhoumqtt.autel.com"),
     new Entry("济南", "119.188.29.149"),
@@ -86,6 +87,45 @@ public class MqttRelayServerCatalog {
         return false;
     }
 
+    public static String cityForHost(String host) {
+        Entry entry = entryForHost(host);
+        return entry != null ? entry.city : "";
+    }
+
+    public static boolean hostOmitsPort(String host) {
+        Entry entry = entryForHost(host);
+        return entry != null && entry.omitPort;
+    }
+
+    /** 运行页/摘要卡展示：含城市名；域名节点省略端口。 */
+    public static String formatEndpoint(String host, int port) {
+        if (host == null || host.isEmpty()) {
+            return "";
+        }
+        Entry entry = entryForHost(host);
+        String normalized = host.trim();
+        if (entry != null) {
+            if (entry.omitPort) {
+                return entry.city + " · " + normalized;
+            }
+            return entry.city + " · " + normalized + ":" + port;
+        }
+        return normalized + ":" + port;
+    }
+
+    private static Entry entryForHost(String host) {
+        if (host == null || host.isEmpty()) {
+            return null;
+        }
+        String normalized = host.trim();
+        for (Entry entry : SERVERS) {
+            if (entry.host.equalsIgnoreCase(normalized)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
     private static int clamp(int index) {
         if (index < 0) {
             return 0;
@@ -99,10 +139,16 @@ public class MqttRelayServerCatalog {
     private static final class Entry {
         public final String city;
         public final String host;
+        public final boolean omitPort;
 
-    public Entry(String city, String host) {
+        Entry(String city, String host) {
+            this(city, host, false);
+        }
+
+        Entry(String city, String host, boolean omitPort) {
             this.city = city;
             this.host = host;
+            this.omitPort = omitPort;
         }
     }
 }
